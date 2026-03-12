@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      119
+// @version      120
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -474,7 +474,10 @@
                 if (resp.ok) {
                     return await resp.json();
                 }
-                console.warn(`[WayBackTube] page fetch HTTP ${resp.status}`);
+                // 403 is expected (Tampermonkey proxy detection) — silently fall through to GM
+                if (resp.status !== 403) {
+                    console.warn(`[WayBackTube] page fetch HTTP ${resp.status}`);
+                }
                 return null; // fall through to GM_xmlhttpRequest
             } catch (e) {
                 console.warn('[WayBackTube] page fetch error:', e.message);
@@ -1489,23 +1492,58 @@
                 this.displayedIndex = 0;
                 const initialBatch = this._showMoreVideos(videoGrid, CONFIG.feed.initialBatchSize);
 
-                // Infinite scroll — poll grid bottom position every 300ms
+                // Infinite scroll — triple approach for YouTube's tricky scroll container
                 if (this.displayedIndex < this.allVideos.length) {
-                    const scrollPoll = setInterval(() => {
-                        if (!document.body.contains(videoGrid)) {
-                            clearInterval(scrollPoll);
-                            return;
-                        }
-                        if (this.displayedIndex >= this.allVideos.length) {
-                            clearInterval(scrollPoll);
-                            return;
-                        }
+                    const self = this;
+                    let loadingMore = false;
+
+                    const tryLoadMore = () => {
+                        if (loadingMore) return;
+                        if (!document.body.contains(videoGrid)) { cleanup(); return; }
+                        if (self.displayedIndex >= self.allVideos.length) { cleanup(); return; }
                         const rect = videoGrid.getBoundingClientRect();
                         if (rect.bottom < window.innerHeight + 800) {
-                            const moreBatch = this._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
-                            this._enrichCardDates(moreBatch);
+                            loadingMore = true;
+                            const moreBatch = self._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
+                            self._enrichCardDates(moreBatch);
+                            // Update "Load More" button visibility
+                            if (loadMoreBtn) {
+                                loadMoreBtn.style.display = self.displayedIndex >= self.allVideos.length ? 'none' : '';
+                            }
+                            loadingMore = false;
                         }
-                    }, 300);
+                    };
+
+                    // 1) Scroll listener in capture phase (catches ALL scroll containers)
+                    const scrollHandler = () => tryLoadMore();
+                    document.addEventListener('scroll', scrollHandler, true);
+
+                    // 2) Polling fallback every 500ms
+                    const scrollPoll = setInterval(tryLoadMore, 500);
+
+                    // 3) Manual "Load More" button as last resort
+                    const loadMoreBtn = document.createElement('button');
+                    loadMoreBtn.textContent = 'Load More Videos';
+                    loadMoreBtn.className = 'wbt-load-more';
+                    loadMoreBtn.style.cssText = 'display:block;margin:16px auto;padding:10px 24px;' +
+                        'background:#065fd4;color:#fff;border:none;border-radius:4px;cursor:pointer;' +
+                        'font-size:14px;font-family:inherit;';
+                    loadMoreBtn.addEventListener('click', () => {
+                        const moreBatch = self._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
+                        self._enrichCardDates(moreBatch);
+                        if (self.displayedIndex >= self.allVideos.length) loadMoreBtn.style.display = 'none';
+                    });
+                    container.appendChild(loadMoreBtn);
+
+                    const cleanup = () => {
+                        clearInterval(scrollPoll);
+                        document.removeEventListener('scroll', scrollHandler, true);
+                        if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+                    };
+
+                    // Initial check — if grid doesn't fill viewport, load more immediately
+                    setTimeout(tryLoadMore, 100);
+                    setTimeout(tryLoadMore, 500);
                 }
 
                 this._homepageReplaced = true;
@@ -1631,20 +1669,23 @@
                 showMoreSidebar();
 
                 if (sidebarIdx < recommendations.length) {
-                    const sidebarPoll = setInterval(() => {
-                        if (!document.body.contains(container)) {
-                            clearInterval(sidebarPoll);
-                            return;
-                        }
-                        if (sidebarIdx >= recommendations.length) {
-                            clearInterval(sidebarPoll);
-                            return;
-                        }
+                    const tryLoadSidebar = () => {
+                        if (!document.body.contains(container)) { cleanupSidebar(); return; }
+                        if (sidebarIdx >= recommendations.length) { cleanupSidebar(); return; }
                         const rect = container.getBoundingClientRect();
                         if (rect.bottom < window.innerHeight + 600) {
                             showMoreSidebar();
                         }
-                    }, 300);
+                    };
+                    const sidebarScrollHandler = () => tryLoadSidebar();
+                    document.addEventListener('scroll', sidebarScrollHandler, true);
+                    const sidebarPoll = setInterval(tryLoadSidebar, 500);
+                    const cleanupSidebar = () => {
+                        clearInterval(sidebarPoll);
+                        document.removeEventListener('scroll', sidebarScrollHandler, true);
+                    };
+                    setTimeout(tryLoadSidebar, 100);
+                    setTimeout(tryLoadSidebar, 500);
                 }
 
                 this._sidebarReplaced = true;
@@ -3737,7 +3778,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v119...');
+            console.log('[WayBackTube] Initializing v120...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -3797,7 +3838,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v119 Ready. Date:', Store.getCurrentDate(),
+            console.log('[WayBackTube] v120 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
