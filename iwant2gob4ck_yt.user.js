@@ -2974,7 +2974,7 @@
             this.panel.appendChild(body);
             document.body.appendChild(this.panel);
             this._attachEvents();
-            this._refreshAllLists();
+            try { this._refreshAllLists(); } catch (e) { console.error('[WayBackTube] List refresh error:', e); }
         }
 
         _buildSection(title, id, openByDefault, children) {
@@ -3301,7 +3301,9 @@
             }
 
             terms.forEach((rawTerm, i) => {
+                if (!rawTerm) return;
                 const term = typeof rawTerm === 'string' ? { term: rawTerm, weight: 3 } : rawTerm;
+                if (!term.term) return;
                 const item = document.createElement('div');
                 item.className = 'wbt-list-item';
 
@@ -3507,11 +3509,11 @@
         // --- Refresh all ---
 
         _refreshAllLists() {
-            this._refreshSubsList();
-            this._refreshTermsList();
-            this._refreshCatsGrid();
-            this._refreshTopicsList();
-            this._refreshStats();
+            try { this._refreshSubsList(); } catch (e) { console.error('[WayBackTube] Subs list error:', e); }
+            try { this._refreshTermsList(); } catch (e) { console.error('[WayBackTube] Terms list error:', e); }
+            try { this._refreshCatsGrid(); } catch (e) { console.error('[WayBackTube] Cats grid error:', e); }
+            try { this._refreshTopicsList(); } catch (e) { console.error('[WayBackTube] Topics list error:', e); }
+            try { this._refreshStats(); } catch (e) { console.error('[WayBackTube] Stats error:', e); }
         }
 
         // --- Toast ---
