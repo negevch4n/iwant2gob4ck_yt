@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      122
+// @version      123
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -1578,73 +1578,96 @@
                 videoGrid.className = 'wbt-grid';
                 container.appendChild(videoGrid);
 
-                // Show initial batch
-                this.displayedIndex = 0;
-                const initialBatch = this._showMoreVideos(videoGrid, CONFIG.feed.initialBatchSize);
-
-                // Infinite scroll — sentinel element approach
-                if (this.displayedIndex < this.allVideos.length) {
-                    const self = this;
-
-                    // Sentinel element at the bottom — when it enters viewport, load more
-                    const sentinel = document.createElement('div');
-                    sentinel.className = 'wbt-scroll-sentinel';
-                    sentinel.style.cssText = 'height:1px;width:100%;';
-                    container.appendChild(sentinel);
-
-                    const doLoadMore = () => {
-                        if (!document.body.contains(videoGrid)) return false;
-                        if (self.displayedIndex >= self.allVideos.length) {
-                            sentinel.style.display = 'none';
-                            return false;
-                        }
-                        const moreBatch = self._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
-                        self._enrichCardDates(moreBatch);
-                        // Move sentinel after the grid so it stays at the bottom
-                        container.appendChild(sentinel);
-                        if (self.displayedIndex >= self.allVideos.length) {
-                            sentinel.style.display = 'none';
-                        }
-                        return true;
-                    };
-
-                    // Strategy 1: IntersectionObserver on the sentinel
-                    // Use the page's scrolling element as root if possible
-                    try {
-                        const observer = new IntersectionObserver((entries) => {
-                            if (entries[0].isIntersecting) doLoadMore();
-                        }, { rootMargin: '0px 0px 800px 0px' });
-                        observer.observe(sentinel);
-                    } catch (e) {
-                        console.warn('[WayBackTube] IntersectionObserver failed:', e);
-                    }
-
-                    // Strategy 2: Scroll listener on ALL possible scroll containers
-                    const checkSentinel = () => {
-                        if (!document.body.contains(sentinel)) return;
-                        if (self.displayedIndex >= self.allVideos.length) return;
-                        const r = sentinel.getBoundingClientRect();
-                        // Sentinel is "near viewport" if its top is within 800px below viewport bottom
-                        if (r.top < window.innerHeight + 800) {
-                            doLoadMore();
-                        }
-                    };
-                    // Capture phase scroll listener + wheel listener (wheel fires even when scroll doesn't)
-                    document.addEventListener('scroll', checkSentinel, true);
-                    document.addEventListener('wheel', checkSentinel, { passive: true });
-
-                    // Strategy 3: Polling at 1s as absolute fallback
-                    const fallbackPoll = setInterval(() => {
-                        if (!document.body.contains(videoGrid)) { clearInterval(fallbackPoll); return; }
-                        if (self.displayedIndex >= self.allVideos.length) { clearInterval(fallbackPoll); return; }
-                        checkSentinel();
-                    }, 1000);
-
-                    // Immediate checks to fill viewport on first load
-                    setTimeout(checkSentinel, 200);
-                    setTimeout(checkSentinel, 600);
-                    setTimeout(checkSentinel, 1200);
+                // Render ALL pre-fetched videos immediately (60 cards is nothing)
+                for (const video of this.allVideos) {
+                    videoGrid.appendChild(VideoRenderer.homepageCard(video));
                 }
+
+                // "Loading more..." indicator for infinite scroll
+                const loadingMore = document.createElement('div');
+                loadingMore.className = 'wbt-loading-more';
+                loadingMore.textContent = 'Loading more videos...';
+                loadingMore.style.cssText = 'text-align:center;padding:20px;color:#aaa;font-size:14px;display:none;';
+                container.appendChild(loadingMore);
+
+                // Infinite scroll: fetch MORE videos from API when user nears bottom
+                const self = this;
+                this._infiniteScrollActive = true;
+                this._infiniteScrollFetching = false;
+                this._infiniteScrollPage = 1;
+
+                const fetchAndAppend = async () => {
+                    if (!self._infiniteScrollActive || self._infiniteScrollFetching) return;
+                    if (!document.body.contains(videoGrid)) { self._infiniteScrollActive = false; return; }
+
+                    self._infiniteScrollFetching = true;
+                    loadingMore.style.display = 'block';
+
+                    try {
+                        const dateStr = Store.getCurrentDate();
+                        if (!dateStr) return;
+
+                        // Fetch a fresh batch from the feed engine (clears seen filter for variety)
+                        const newVideos = await self.feedEngine.buildHomeFeed(dateStr);
+                        if (!document.body.contains(videoGrid)) return;
+
+                        // Filter out videos already on the page
+                        const existingIds = new Set(self.allVideos.map(v => v.id));
+                        const fresh = newVideos.filter(v => !existingIds.has(v.id));
+
+                        if (fresh.length === 0) {
+                            // No new videos — stop infinite scroll
+                            loadingMore.textContent = 'No more videos to load';
+                            loadingMore.style.display = 'block';
+                            self._infiniteScrollActive = false;
+                            return;
+                        }
+
+                        // Append new videos
+                        for (const video of fresh) {
+                            videoGrid.appendChild(VideoRenderer.homepageCard(video));
+                            self.allVideos.push(video);
+                        }
+                        self._infiniteScrollPage++;
+                        self._enrichCardDates(fresh);
+                        Store.addSeenIds(fresh.map(v => v.id));
+                    } catch (e) {
+                        console.warn('[WayBackTube] Infinite scroll fetch error:', e.message);
+                    } finally {
+                        self._infiniteScrollFetching = false;
+                        loadingMore.style.display = 'none';
+                    }
+                };
+
+                // Detect when user scrolls near bottom — use the ACTUAL scrolling element
+                const getScrollInfo = () => {
+                    // Try YouTube's known scroll containers
+                    const ytApp = document.querySelector('ytd-app');
+                    if (ytApp && ytApp.scrollHeight > ytApp.clientHeight) {
+                        return { el: ytApp, top: ytApp.scrollTop, height: ytApp.scrollHeight, client: ytApp.clientHeight };
+                    }
+                    const se = document.scrollingElement || document.documentElement;
+                    return { el: se, top: se.scrollTop, height: se.scrollHeight, client: se.clientHeight };
+                };
+
+                const checkScroll = () => {
+                    if (!self._infiniteScrollActive || self._infiniteScrollFetching) return;
+                    const info = getScrollInfo();
+                    // Trigger when within 1000px of the bottom
+                    if (info.top + info.client >= info.height - 1000) {
+                        fetchAndAppend();
+                    }
+                };
+
+                // Listen for scroll on multiple targets
+                document.addEventListener('scroll', checkScroll, true);
+                document.addEventListener('wheel', checkScroll, { passive: true });
+                // Polling fallback
+                const scrollPoll = setInterval(() => {
+                    if (!document.body.contains(videoGrid)) { clearInterval(scrollPoll); return; }
+                    if (!self._infiniteScrollActive) { clearInterval(scrollPoll); return; }
+                    checkScroll();
+                }, 2000);
 
                 this._homepageReplaced = true;
                 this._homepageLoading = false;
@@ -1654,7 +1677,7 @@
                 Store.addSeenIds(this.allVideos.map(v => v.id));
 
                 // Progressively fetch real publish dates in the background
-                this._enrichCardDates(initialBatch);
+                this._enrichCardDates(this.allVideos);
             } catch (e) {
                 console.error('[WayBackTube] Homepage load error:', e);
                 // Verify container still exists before updating it
@@ -1667,16 +1690,8 @@
             }
         }
 
-        _showMoreVideos(grid, count) {
-            const batch = this.allVideos.slice(this.displayedIndex, this.displayedIndex + count);
-            for (const video of batch) {
-                grid.appendChild(VideoRenderer.homepageCard(video));
-            }
-            this.displayedIndex += batch.length;
-            return batch;
-        }
-
         async _refreshHomepage() {
+            this._infiniteScrollActive = false; // stop any running infinite scroll
             this._homepageReplaced = false;
             this._homepageLoading = false;
             const container = document.querySelector('.wbt-container');
@@ -3955,7 +3970,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v122...');
+            console.log('[WayBackTube] Initializing v123...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -4015,7 +4030,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v122 Ready. Date:', Store.getCurrentDate(),
+            console.log('[WayBackTube] v123 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
