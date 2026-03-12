@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      118
+// @version      119
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -416,8 +416,8 @@
         // --- InnerTube config ---
 
         _getConfig() {
-            // Cache for 60s to avoid re-reading ytcfg on every request
-            if (this._configCache && Date.now() - this._configCacheTs < 60000) {
+            // Cache for 30s to avoid re-reading ytcfg on every request
+            if (this._configCache && Date.now() - this._configCacheTs < 30000) {
                 return this._configCache;
             }
 
@@ -425,21 +425,28 @@
             try {
                 const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
                 cfg = win.ytcfg?.data_;
-                if (cfg) {
-                    console.log('[WayBackTube] ytcfg found: version=' + cfg.INNERTUBE_CLIENT_VERSION +
-                        ', key=' + (cfg.INNERTUBE_API_KEY || 'none').substring(0, 10) + '...' +
-                        ', visitor=' + (cfg.VISITOR_DATA ? 'yes' : 'no'));
-                }
             } catch { /* fallback */ }
 
+            // Extract the FULL InnerTube context (includes all fields YouTube expects)
+            let fullContext = null;
+            if (cfg?.INNERTUBE_CONTEXT) {
+                try {
+                    // Deep clone to avoid mutating YouTube's own object
+                    fullContext = JSON.parse(JSON.stringify(cfg.INNERTUBE_CONTEXT));
+                } catch { /* fallback to manual context */ }
+            }
+
             const result = {
-                clientName: cfg?.INNERTUBE_CLIENT_NAME || 'WEB',
-                clientVersion: cfg?.INNERTUBE_CLIENT_VERSION || '2.20260301.00.00',
                 apiKey: cfg?.INNERTUBE_API_KEY || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
-                hl: cfg?.HL || 'en',
-                gl: cfg?.GL || 'US',
-                visitorData: cfg?.VISITOR_DATA || '',
+                clientVersion: cfg?.INNERTUBE_CLIENT_VERSION || '2.20260301.00.00',
+                fullContext, // complete context object from YouTube
             };
+
+            if (!this._configCache) {
+                console.log('[WayBackTube] ytcfg: version=' + result.clientVersion +
+                    ', key=' + result.apiKey.substring(0, 10) + '...' +
+                    ', fullContext=' + (fullContext ? 'YES' : 'NO'));
+            }
 
             this._configCache = result;
             this._configCacheTs = Date.now();
@@ -501,6 +508,23 @@
             });
         }
 
+        // --- Build request context (use YouTube's full context if available) ---
+
+        _buildContext(cfg) {
+            if (cfg.fullContext) {
+                return cfg.fullContext;
+            }
+            // Fallback: minimal context (shouldn't happen if ytcfg loaded)
+            return {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: cfg.clientVersion,
+                    hl: 'en',
+                    gl: 'US',
+                },
+            };
+        }
+
         // --- Core InnerTube POST: page fetch first, then GM_xmlhttpRequest ---
 
         async _post(endpoint, body) {
@@ -509,18 +533,8 @@
             const cfg = this._getConfig();
             const url = `https://www.youtube.com/youtubei/v1/${endpoint}?key=${cfg.apiKey}&prettyPrint=false`;
 
-            const clientContext = {
-                clientName: cfg.clientName,
-                clientVersion: cfg.clientVersion,
-                hl: cfg.hl,
-                gl: cfg.gl,
-            };
-            if (cfg.visitorData) {
-                clientContext.visitorData = cfg.visitorData;
-            }
-
             const fullBody = {
-                context: { client: clientContext },
+                context: this._buildContext(cfg),
                 ...body,
             };
 
@@ -548,7 +562,7 @@
             try {
                 return await this._postViaGM(url, fullBody, headers);
             } catch (err) {
-                // Retry once on 403/5xx
+                // Retry once on 403/5xx with fresh config
                 if (err.status === 403 || (err.status >= 500 && err.status < 600)) {
                     console.warn(`[WayBackTube] ${endpoint} got ${err.status}, retrying in 1s...`);
                     this._configCache = null;
@@ -560,14 +574,7 @@
                     const auth2 = await this._getSapisidHash('https://www.youtube.com');
                     if (auth2) headers['Authorization'] = auth2;
 
-                    const ctx2 = {
-                        clientName: cfg2.clientName,
-                        clientVersion: cfg2.clientVersion,
-                        hl: cfg2.hl,
-                        gl: cfg2.gl,
-                    };
-                    if (cfg2.visitorData) ctx2.visitorData = cfg2.visitorData;
-                    fullBody.context.client = ctx2;
+                    fullBody.context = this._buildContext(cfg2);
 
                     return await this._postViaGM(url2, fullBody, headers);
                 }
@@ -3730,7 +3737,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v118...');
+            console.log('[WayBackTube] Initializing v119...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -3741,7 +3748,7 @@
 
             // Clear ALL caches on version upgrade (prevents stale data from broken versions)
             const lastVersion = Store._get('wbt_last_version', 0);
-            if (lastVersion < 118) {
+            if (lastVersion < 119) {
                 console.log('[WayBackTube] Version upgrade detected, clearing all caches...');
                 try {
                     const allKeys = GM_listValues();
@@ -3751,7 +3758,7 @@
                 } catch (e) {
                     console.warn('[WayBackTube] Cache clear failed:', e);
                 }
-                Store._set('wbt_last_version', 118);
+                Store._set('wbt_last_version', 119);
             }
 
             // Sync clock with external time source (non-blocking)
@@ -3790,7 +3797,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v118 Ready. Date:', Store.getCurrentDate(),
+            console.log('[WayBackTube] v119 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
