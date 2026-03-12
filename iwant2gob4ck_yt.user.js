@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      121
+// @version      122
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -38,7 +38,7 @@
         feed: {
             dateWindowDays: 7,
             maxHomepageVideos: 60,
-            maxRecommendations: 20,
+            maxRecommendations: 30,
             initialBatchSize: 16,
             loadMoreSize: 12,
             weights: {
@@ -1050,7 +1050,7 @@
 
         async buildRecommendations(currentVideoId, selectedDate) {
             const dateWindow = this._dateWindow(selectedDate);
-            const count = CONFIG.feed.maxRecommendations;
+            const targetCount = 30; // Show ~30 sidebar videos
 
             const cacheKey = `rec_${currentVideoId}_${dateWindow.center.toDateString()}`;
             const cached = Store.getCacheEntry(cacheKey);
@@ -1059,40 +1059,121 @@
             try {
                 // Get current video details for context
                 const details = await this.api.getVideoDetails([currentVideoId]);
-                if (!details.length) return [];
 
-                const current = details[0];
-                const channelName = current.channel || '';
-                const title = current.title || '';
-                const keywords = this._extractKeywords(title);
+                let relatedVideos = [];
+                if (details.length) {
+                    const current = details[0];
+                    const channelName = current.channel || '';
+                    const title = current.title || '';
+                    const keywords = this._extractKeywords(title);
 
-                // 60% same channel, 40% keyword-based from other channels
-                const sameCount = Math.floor(count * 0.6);
-                const keywordCount = count - sameCount;
+                    // Fetch related: same channel + keyword-based
+                    const [sameChannel, keywordVideos] = await Promise.allSettled([
+                        channelName ? this.api.getChannelVideos(channelName, {
+                            publishedAfter: dateWindow.after,
+                            publishedBefore: dateWindow.before,
+                            maxResults: 10,
+                            order: 'date',
+                        }) : Promise.resolve([]),
+                        keywords.length ? this._searchKeywords(keywords, dateWindow, 10, current.channelId) : Promise.resolve([]),
+                    ]);
 
-                const [sameChannel, keywordVideos] = await Promise.all([
-                    channelName ? this.api.getChannelVideos(channelName, {
-                        publishedAfter: dateWindow.after,
-                        publishedBefore: dateWindow.before,
-                        maxResults: sameCount * 2,
-                        order: 'date',
-                    }) : Promise.resolve([]),
-                    keywords.length ? this._searchKeywords(keywords, dateWindow, keywordCount, current.channelId) : Promise.resolve([]),
-                ]);
+                    const same = sameChannel.status === 'fulfilled' ? sameChannel.value : [];
+                    const kw = keywordVideos.status === 'fulfilled' ? keywordVideos.value : [];
+                    relatedVideos = [...same.slice(0, 6), ...kw];
+                }
 
-                const combined = [
-                    ...sameChannel.slice(0, sameCount),
-                    ...keywordVideos,
-                ];
+                // Fetch random "discovery" videos from user's feed sources
+                // (subscriptions, categories, topics) to simulate an algorithm
+                const randomVideos = await this._fetchRandomSidebar(dateWindow, targetCount);
 
-                const deduped = this._dedupe(combined).filter(v => v.id !== currentVideoId).slice(0, count);
+                // Interleave: related videos scattered among random ones
+                // Place a related video roughly every 3-4 slots
+                const related = this._dedupe(relatedVideos).filter(v => v.id !== currentVideoId);
+                const random = this._dedupe(randomVideos).filter(v => v.id !== currentVideoId);
 
-                if (deduped.length) Store.setCacheEntry(cacheKey, deduped);
-                return deduped;
+                const merged = [];
+                let ri = 0, di = 0;
+                const usedIds = new Set([currentVideoId]);
+
+                while (merged.length < targetCount && (ri < related.length || di < random.length)) {
+                    // Every 3rd-4th slot, insert a related video if available
+                    if (ri < related.length && (merged.length % 3 === 0 || di >= random.length)) {
+                        if (!usedIds.has(related[ri].id)) {
+                            usedIds.add(related[ri].id);
+                            merged.push(related[ri]);
+                        }
+                        ri++;
+                    } else if (di < random.length) {
+                        if (!usedIds.has(random[di].id)) {
+                            usedIds.add(random[di].id);
+                            merged.push(random[di]);
+                        }
+                        di++;
+                    } else {
+                        break;
+                    }
+                }
+
+                if (merged.length) Store.setCacheEntry(cacheKey, merged);
+                return merged;
             } catch (e) {
                 console.warn('[WayBackTube] Recommendations error:', e.message);
                 return [];
             }
+        }
+
+        // Fetch random videos from user's sources for sidebar discovery
+        async _fetchRandomSidebar(dateWindow, count) {
+            const subs = Store.getSubscriptions();
+            const topics = Store.getTopics();
+            const cats = Store.getCategories();
+
+            const fetches = [];
+
+            // Pick a few random subscriptions
+            if (subs.length) {
+                const shuffled = [...subs].sort(() => Math.random() - 0.5).slice(0, 3);
+                for (const sub of shuffled) {
+                    fetches.push(this.api.getChannelVideos(sub.name, {
+                        publishedAfter: dateWindow.after,
+                        publishedBefore: dateWindow.before,
+                        maxResults: 5,
+                    }));
+                }
+            }
+
+            // Pick a random category
+            if (cats.length) {
+                const cat = cats[Math.floor(Math.random() * cats.length)];
+                fetches.push(this.api.getPopularByCategory(cat, {
+                    publishedAfter: dateWindow.after,
+                    publishedBefore: dateWindow.before,
+                    maxResults: 8,
+                }));
+            }
+
+            // Pick a random topic
+            if (topics.length) {
+                const raw = topics[Math.floor(Math.random() * topics.length)];
+                const name = typeof raw === 'string' ? raw : raw.name;
+                fetches.push(this.api.searchVideos(name, {
+                    publishedAfter: dateWindow.after,
+                    publishedBefore: dateWindow.before,
+                    maxResults: 5,
+                    order: 'viewCount',
+                }));
+            }
+
+            if (!fetches.length) return [];
+
+            const results = await Promise.allSettled(fetches);
+            const all = results
+                .filter(r => r.status === 'fulfilled')
+                .flatMap(r => r.value);
+
+            // Shuffle and return
+            return all.sort(() => Math.random() - 0.5).slice(0, count);
         }
 
         async _searchKeywords(keywords, dateWindow, count, excludeChannelId) {
@@ -1501,58 +1582,68 @@
                 this.displayedIndex = 0;
                 const initialBatch = this._showMoreVideos(videoGrid, CONFIG.feed.initialBatchSize);
 
-                // Infinite scroll — triple approach for YouTube's tricky scroll container
+                // Infinite scroll — sentinel element approach
                 if (this.displayedIndex < this.allVideos.length) {
                     const self = this;
-                    let loadingMore = false;
 
-                    const tryLoadMore = () => {
-                        if (loadingMore) return;
-                        if (!document.body.contains(videoGrid)) { cleanup(); return; }
-                        if (self.displayedIndex >= self.allVideos.length) { cleanup(); return; }
-                        const rect = videoGrid.getBoundingClientRect();
-                        if (rect.bottom < window.innerHeight + 800) {
-                            loadingMore = true;
-                            const moreBatch = self._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
-                            self._enrichCardDates(moreBatch);
-                            // Update "Load More" button visibility
-                            if (loadMoreBtn) {
-                                loadMoreBtn.style.display = self.displayedIndex >= self.allVideos.length ? 'none' : '';
-                            }
-                            loadingMore = false;
+                    // Sentinel element at the bottom — when it enters viewport, load more
+                    const sentinel = document.createElement('div');
+                    sentinel.className = 'wbt-scroll-sentinel';
+                    sentinel.style.cssText = 'height:1px;width:100%;';
+                    container.appendChild(sentinel);
+
+                    const doLoadMore = () => {
+                        if (!document.body.contains(videoGrid)) return false;
+                        if (self.displayedIndex >= self.allVideos.length) {
+                            sentinel.style.display = 'none';
+                            return false;
                         }
-                    };
-
-                    // 1) Scroll listener in capture phase (catches ALL scroll containers)
-                    const scrollHandler = () => tryLoadMore();
-                    document.addEventListener('scroll', scrollHandler, true);
-
-                    // 2) Polling fallback every 500ms
-                    const scrollPoll = setInterval(tryLoadMore, 500);
-
-                    // 3) Manual "Load More" button as last resort
-                    const loadMoreBtn = document.createElement('button');
-                    loadMoreBtn.textContent = 'Load More Videos';
-                    loadMoreBtn.className = 'wbt-load-more';
-                    loadMoreBtn.style.cssText = 'display:block;margin:16px auto;padding:10px 24px;' +
-                        'background:#065fd4;color:#fff;border:none;border-radius:4px;cursor:pointer;' +
-                        'font-size:14px;font-family:inherit;';
-                    loadMoreBtn.addEventListener('click', () => {
                         const moreBatch = self._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
                         self._enrichCardDates(moreBatch);
-                        if (self.displayedIndex >= self.allVideos.length) loadMoreBtn.style.display = 'none';
-                    });
-                    container.appendChild(loadMoreBtn);
-
-                    const cleanup = () => {
-                        clearInterval(scrollPoll);
-                        document.removeEventListener('scroll', scrollHandler, true);
-                        if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+                        // Move sentinel after the grid so it stays at the bottom
+                        container.appendChild(sentinel);
+                        if (self.displayedIndex >= self.allVideos.length) {
+                            sentinel.style.display = 'none';
+                        }
+                        return true;
                     };
 
-                    // Initial check — if grid doesn't fill viewport, load more immediately
-                    setTimeout(tryLoadMore, 100);
-                    setTimeout(tryLoadMore, 500);
+                    // Strategy 1: IntersectionObserver on the sentinel
+                    // Use the page's scrolling element as root if possible
+                    try {
+                        const observer = new IntersectionObserver((entries) => {
+                            if (entries[0].isIntersecting) doLoadMore();
+                        }, { rootMargin: '0px 0px 800px 0px' });
+                        observer.observe(sentinel);
+                    } catch (e) {
+                        console.warn('[WayBackTube] IntersectionObserver failed:', e);
+                    }
+
+                    // Strategy 2: Scroll listener on ALL possible scroll containers
+                    const checkSentinel = () => {
+                        if (!document.body.contains(sentinel)) return;
+                        if (self.displayedIndex >= self.allVideos.length) return;
+                        const r = sentinel.getBoundingClientRect();
+                        // Sentinel is "near viewport" if its top is within 800px below viewport bottom
+                        if (r.top < window.innerHeight + 800) {
+                            doLoadMore();
+                        }
+                    };
+                    // Capture phase scroll listener + wheel listener (wheel fires even when scroll doesn't)
+                    document.addEventListener('scroll', checkSentinel, true);
+                    document.addEventListener('wheel', checkSentinel, { passive: true });
+
+                    // Strategy 3: Polling at 1s as absolute fallback
+                    const fallbackPoll = setInterval(() => {
+                        if (!document.body.contains(videoGrid)) { clearInterval(fallbackPoll); return; }
+                        if (self.displayedIndex >= self.allVideos.length) { clearInterval(fallbackPoll); return; }
+                        checkSentinel();
+                    }, 1000);
+
+                    // Immediate checks to fill viewport on first load
+                    setTimeout(checkSentinel, 200);
+                    setTimeout(checkSentinel, 600);
+                    setTimeout(checkSentinel, 1200);
                 }
 
                 this._homepageReplaced = true;
@@ -1665,36 +1756,9 @@
                 header.textContent = 'Recommended';
                 container.appendChild(header);
 
-                // Show initial batch, then infinite scroll the rest
-                const sidebarInitial = 6;
-                let sidebarIdx = 0;
-                const showMoreSidebar = () => {
-                    const batch = recommendations.slice(sidebarIdx, sidebarIdx + sidebarInitial);
-                    for (const video of batch) {
-                        container.appendChild(VideoRenderer.sidebarCard(video));
-                    }
-                    sidebarIdx += batch.length;
-                };
-                showMoreSidebar();
-
-                if (sidebarIdx < recommendations.length) {
-                    const tryLoadSidebar = () => {
-                        if (!document.body.contains(container)) { cleanupSidebar(); return; }
-                        if (sidebarIdx >= recommendations.length) { cleanupSidebar(); return; }
-                        const rect = container.getBoundingClientRect();
-                        if (rect.bottom < window.innerHeight + 600) {
-                            showMoreSidebar();
-                        }
-                    };
-                    const sidebarScrollHandler = () => tryLoadSidebar();
-                    document.addEventListener('scroll', sidebarScrollHandler, true);
-                    const sidebarPoll = setInterval(tryLoadSidebar, 500);
-                    const cleanupSidebar = () => {
-                        clearInterval(sidebarPoll);
-                        document.removeEventListener('scroll', sidebarScrollHandler, true);
-                    };
-                    setTimeout(tryLoadSidebar, 100);
-                    setTimeout(tryLoadSidebar, 500);
+                // Show all recommendations — ~30 sidebar cards is fine for perf
+                for (const video of recommendations) {
+                    container.appendChild(VideoRenderer.sidebarCard(video));
                 }
 
                 this._sidebarReplaced = true;
@@ -3891,7 +3955,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v121...');
+            console.log('[WayBackTube] Initializing v122...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -3951,7 +4015,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v121 Ready. Date:', Store.getCurrentDate(),
+            console.log('[WayBackTube] v122 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
