@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      120
+// @version      121
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -149,6 +149,10 @@
         // --- Custom Topics ---
         static getTopics()          { return this._get('wbt_topics', []); }
         static setTopics(t)         { this._set('wbt_topics', t); }
+
+        // --- Blocked Channels ---
+        static getBlockedChannels() { return this._get('wbt_blocked_channels', []); }
+        static setBlockedChannels(b) { this._set('wbt_blocked_channels', b); }
 
         // --- Active state ---
         static isActive()           { return this._get('wbt_active', this._get('ytActive', true)); }
@@ -800,8 +804,13 @@
 
         _dedupe(videos) {
             const seen = new Set();
+            const blocked = new Set(Store.getBlockedChannels().map(b => b.name.toLowerCase()));
+            const blockedIds = new Set(Store.getBlockedChannels().map(b => b.id).filter(Boolean));
             return videos.filter(v => {
                 if (!v || seen.has(v.id)) return false;
+                // Filter blocked channels by name or ID
+                if (v.channel && blocked.has(v.channel.toLowerCase())) return false;
+                if (v.channelId && blockedIds.has(v.channelId)) return false;
                 seen.add(v.id);
                 return true;
             });
@@ -3203,6 +3212,18 @@
             topicList.id = 'wbt-topic-list';
             body.appendChild(this._buildSection('Custom Topics', 'topics', false, [topicRow, topicList]));
 
+            // --- Blocked Channels section ---
+            const blockInput = document.createElement('input');
+            blockInput.className = 'wbt-add-input';
+            blockInput.id = 'wbt-block-input';
+            blockInput.placeholder = 'Channel name to block';
+            const blockBtn = _el('button', 'wbt-add-btn', 'Block');
+            blockBtn.id = 'wbt-block-add';
+            const blockRow = _el('div', 'wbt-add-row', [blockInput, blockBtn]);
+            const blockList = _el('div', 'wbt-list');
+            blockList.id = 'wbt-block-list';
+            body.appendChild(this._buildSection('Blocked Channels', 'block', false, [blockRow, blockList]));
+
             // --- Stats section ---
             const statsGrid = _el('div', 'wbt-stats-grid');
             statsGrid.id = 'wbt-stats';
@@ -3309,6 +3330,7 @@
                         if (id === 'search') this._refreshTermsList();
                         if (id === 'cats') this._refreshCatsGrid();
                         if (id === 'topics') this._refreshTopicsList();
+                        if (id === 'block') this._refreshBlockList();
                         if (id === 'stats') this._refreshStats();
                     }
                 });
@@ -3381,6 +3403,12 @@
             this.panel.querySelector('#wbt-topic-add').addEventListener('click', () => this._addTopic());
             this.panel.querySelector('#wbt-topic-input').addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') this._addTopic();
+            });
+
+            // Block channel
+            this.panel.querySelector('#wbt-block-add').addEventListener('click', () => this._addBlockedChannel());
+            this.panel.querySelector('#wbt-block-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this._addBlockedChannel();
             });
         }
 
@@ -3701,6 +3729,89 @@
             });
         }
 
+        // --- Blocked channel management ---
+
+        async _addBlockedChannel() {
+            const input = this.panel.querySelector('#wbt-block-input');
+            const val = input.value.trim();
+            if (!val) return;
+
+            input.disabled = true;
+            const btn = this.panel.querySelector('#wbt-block-add');
+            btn.textContent = '...';
+
+            try {
+                const ch = await this.api.resolveChannel(val);
+                const entry = ch
+                    ? { id: ch.id, name: ch.name }
+                    : { id: '', name: val }; // allow blocking by name even if unresolved
+
+                const blocked = Store.getBlockedChannels();
+                if (blocked.some(b => b.name.toLowerCase() === entry.name.toLowerCase())) {
+                    this._toast('Already blocked', 'error');
+                    return;
+                }
+
+                blocked.push(entry);
+                Store.setBlockedChannels(blocked);
+                input.value = '';
+                this._refreshBlockList();
+                this._toast(`Blocked ${entry.name}`, 'success');
+            } catch (e) {
+                // Still add by name even if resolve fails
+                const blocked = Store.getBlockedChannels();
+                if (blocked.some(b => b.name.toLowerCase() === val.toLowerCase())) {
+                    this._toast('Already blocked', 'error');
+                    return;
+                }
+                blocked.push({ id: '', name: val });
+                Store.setBlockedChannels(blocked);
+                input.value = '';
+                this._refreshBlockList();
+                this._toast(`Blocked ${val}`, 'success');
+            } finally {
+                input.disabled = false;
+                btn.textContent = 'Block';
+            }
+        }
+
+        _refreshBlockList() {
+            const list = this.panel.querySelector('#wbt-block-list');
+            if (!list) return;
+            const blocked = Store.getBlockedChannels();
+            _clear(list);
+
+            if (!blocked.length) {
+                const empty = _el('div', null, 'No blocked channels');
+                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                list.appendChild(empty);
+                return;
+            }
+
+            blocked.forEach((ch, i) => {
+                const item = document.createElement('div');
+                item.className = 'wbt-list-item';
+
+                const name = document.createElement('span');
+                name.className = 'wbt-list-name';
+                name.textContent = ch.name;
+
+                const btn = document.createElement('button');
+                btn.className = 'wbt-list-remove';
+                btn.textContent = 'X';
+                btn.addEventListener('click', () => {
+                    const b = Store.getBlockedChannels();
+                    b.splice(i, 1);
+                    Store.setBlockedChannels(b);
+                    this._refreshBlockList();
+                });
+
+                item.appendChild(name);
+                item.appendChild(btn);
+                list.appendChild(item);
+            });
+        }
+
         // --- Stats ---
 
         _refreshStats() {
@@ -3714,6 +3825,7 @@
                 'Search Terms': String(Store.getSearchTerms().length),
                 'Categories': String(Store.getCategories().length),
                 'Topics': String(Store.getTopics().length),
+                'Blocked': String(Store.getBlockedChannels().length),
             };
 
             for (const [label, value] of Object.entries(stats)) {
@@ -3750,6 +3862,7 @@
             try { this._refreshTermsList(); } catch (e) { console.error('[WayBackTube] Terms list error:', e); }
             try { this._refreshCatsGrid(); } catch (e) { console.error('[WayBackTube] Cats grid error:', e); }
             try { this._refreshTopicsList(); } catch (e) { console.error('[WayBackTube] Topics list error:', e); }
+            try { this._refreshBlockList(); } catch (e) { console.error('[WayBackTube] Block list error:', e); }
             try { this._refreshStats(); } catch (e) { console.error('[WayBackTube] Stats error:', e); }
         }
 
@@ -3778,7 +3891,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v120...');
+            console.log('[WayBackTube] Initializing v121...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -3838,7 +3951,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v120 Ready. Date:', Store.getCurrentDate(),
+            console.log('[WayBackTube] v121 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
