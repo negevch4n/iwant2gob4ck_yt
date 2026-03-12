@@ -1311,32 +1311,23 @@
                 this.displayedIndex = 0;
                 const initialBatch = this._showMoreVideos(videoGrid, CONFIG.feed.initialBatchSize);
 
-                // Infinite scroll via window scroll listener
+                // Infinite scroll — poll grid bottom position every 300ms
                 if (this.displayedIndex < this.allVideos.length) {
-                    const sentinel = _el('div', 'wbt-sentinel');
-                    sentinel.style.height = '1px';
-                    container.appendChild(sentinel);
-
-                    let loading = false;
-                    const onScroll = () => {
-                        if (loading) return;
-                        if (this.displayedIndex >= this.allVideos.length) {
-                            sentinel.style.display = 'none';
-                            window.removeEventListener('scroll', onScroll);
+                    const scrollPoll = setInterval(() => {
+                        if (!document.body.contains(videoGrid)) {
+                            clearInterval(scrollPoll);
                             return;
                         }
-                        const rect = sentinel.getBoundingClientRect();
-                        if (rect.top < window.innerHeight + 800) {
-                            loading = true;
+                        if (this.displayedIndex >= this.allVideos.length) {
+                            clearInterval(scrollPoll);
+                            return;
+                        }
+                        const rect = videoGrid.getBoundingClientRect();
+                        if (rect.bottom < window.innerHeight + 800) {
                             const moreBatch = this._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
                             this._enrichCardDates(moreBatch);
-                            loading = false;
                         }
-                    };
-                    window.addEventListener('scroll', onScroll, { passive: true });
-                    // Fire immediately in case content doesn't fill the viewport
-                    setTimeout(onScroll, 100);
-                    setTimeout(onScroll, 500);
+                    }, 300);
                 }
 
                 this._homepageReplaced = true;
@@ -1448,8 +1439,33 @@
                 header.textContent = 'Recommended';
                 container.appendChild(header);
 
-                for (const video of recommendations) {
-                    container.appendChild(VideoRenderer.sidebarCard(video));
+                // Show initial batch, then infinite scroll the rest
+                const sidebarInitial = 6;
+                let sidebarIdx = 0;
+                const showMoreSidebar = () => {
+                    const batch = recommendations.slice(sidebarIdx, sidebarIdx + sidebarInitial);
+                    for (const video of batch) {
+                        container.appendChild(VideoRenderer.sidebarCard(video));
+                    }
+                    sidebarIdx += batch.length;
+                };
+                showMoreSidebar();
+
+                if (sidebarIdx < recommendations.length) {
+                    const sidebarPoll = setInterval(() => {
+                        if (!document.body.contains(container)) {
+                            clearInterval(sidebarPoll);
+                            return;
+                        }
+                        if (sidebarIdx >= recommendations.length) {
+                            clearInterval(sidebarPoll);
+                            return;
+                        }
+                        const rect = container.getBoundingClientRect();
+                        if (rect.bottom < window.innerHeight + 600) {
+                            showMoreSidebar();
+                        }
+                    }, 300);
                 }
 
                 this._sidebarReplaced = true;
