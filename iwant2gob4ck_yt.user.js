@@ -700,23 +700,26 @@
         }
 
         async _fetchSearchTerms(dateWindow, count) {
-            const terms = Store.getSearchTerms();
+            const raw = Store.getSearchTerms();
+            const terms = raw.map(t => typeof t === 'string' ? { term: t, weight: 3 } : t);
             if (!terms.length) return [];
 
             const cacheKey = `search_${dateWindow.center.toDateString()}`;
             const cached = Store.getCacheEntry(cacheKey);
             if (cached) return cached;
 
-            const perTerm = Math.max(5, Math.ceil(count / terms.length));
+            const totalWeight = terms.reduce((sum, t) => sum + (t.weight || 3), 0);
             const batches = await Promise.allSettled(
-                terms.map(term =>
-                    this.api.searchVideos(term, {
+                terms.map(t => {
+                    const w = t.weight || 3;
+                    const perTerm = Math.max(3, Math.ceil(count * w / totalWeight));
+                    return this.api.searchVideos(t.term, {
                         publishedAfter: dateWindow.after,
                         publishedBefore: dateWindow.before,
                         maxResults: perTerm,
                         order: 'relevance',
-                    })
-                )
+                    });
+                })
             );
 
             const videos = batches
@@ -3264,12 +3267,13 @@
             if (!val) return;
 
             const terms = Store.getSearchTerms();
-            if (terms.includes(val)) {
+            const names = terms.map(t => (typeof t === 'string' ? t : t.term).toLowerCase());
+            if (names.includes(val)) {
                 this._toast('Term already exists', 'error');
                 return;
             }
 
-            terms.push(val);
+            terms.push({ term: val, weight: 3 });
             Store.setSearchTerms(terms);
             input.value = '';
             this._refreshTermsList();
@@ -3289,13 +3293,36 @@
                 return;
             }
 
-            terms.forEach((term, i) => {
+            terms.forEach((rawTerm, i) => {
+                const term = typeof rawTerm === 'string' ? { term: rawTerm, weight: 3 } : rawTerm;
                 const item = document.createElement('div');
                 item.className = 'wbt-list-item';
 
                 const name = document.createElement('span');
                 name.className = 'wbt-list-name';
-                name.textContent = term;
+                name.textContent = term.term;
+
+                const weightCtrl = _el('div', 'wbt-weight-ctrl');
+                const wDown = _el('button', 'wbt-weight-btn', '-');
+                const wLabel = _el('span', 'wbt-weight-label', String(term.weight || 3));
+                const wUp = _el('button', 'wbt-weight-btn', '+');
+                wDown.addEventListener('click', () => {
+                    const t = Store.getSearchTerms();
+                    if (typeof t[i] === 'string') t[i] = { term: t[i], weight: 3 };
+                    t[i].weight = Math.max(1, (t[i].weight || 3) - 1);
+                    Store.setSearchTerms(t);
+                    this._refreshTermsList();
+                });
+                wUp.addEventListener('click', () => {
+                    const t = Store.getSearchTerms();
+                    if (typeof t[i] === 'string') t[i] = { term: t[i], weight: 3 };
+                    t[i].weight = Math.min(5, (t[i].weight || 3) + 1);
+                    Store.setSearchTerms(t);
+                    this._refreshTermsList();
+                });
+                weightCtrl.appendChild(wDown);
+                weightCtrl.appendChild(wLabel);
+                weightCtrl.appendChild(wUp);
 
                 const btn = document.createElement('button');
                 btn.className = 'wbt-list-remove';
