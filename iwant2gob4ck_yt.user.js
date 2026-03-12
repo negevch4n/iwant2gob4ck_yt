@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      113
+// @version      114
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -157,6 +157,15 @@
         // --- Minimized state ---
         static isMinimized()        { return this._get('wbt_minimized', false); }
         static setMinimized(v)      { this._set('wbt_minimized', v); }
+
+        // --- Collapsed state (tiny FAB button) ---
+        static isCollapsed()        { return this._get('wbt_collapsed', false); }
+        static setCollapsed(v)      { this._set('wbt_collapsed', v); }
+
+        // --- Custom logo (data URL) ---
+        static getCustomLogo()      { return this._get('wbt_custom_logo', null); }
+        static setCustomLogo(dataUrl) { this._set('wbt_custom_logo', dataUrl); }
+        static clearCustomLogo()    { this._del('wbt_custom_logo'); }
 
         // --- Rolling clock ---
         static isClockActive()      { return this._get('wbt_clock_active', false); }
@@ -1468,7 +1477,8 @@
             const query = params.get('search_query') || '';
 
             if (query.includes('before:')) {
-                this._cleanSearchDisplay(query);
+                // Already filtered — just clean the search input visually
+                this._pendingSearchClean = query.replace(/\s*before:\d{4}-\d{2}-\d{2}/g, '').trim();
                 return;
             }
 
@@ -1476,42 +1486,49 @@
             window.location.replace(`/results?${params.toString()}`);
         }
 
-        _cleanSearchDisplay(fullQuery) {
-            const clean = fullQuery.replace(/\s*before:\d{4}-\d{2}-\d{2}/g, '').trim();
-            this._pendingSearchClean = clean;
-
-            const params = new URLSearchParams(location.search);
-            params.set('search_query', clean);
-            const cleanUrl = `${location.pathname}?${params.toString()}`;
-            history.replaceState(null, '', cleanUrl);
-
-            const input = document.querySelector('input#search');
-            if (input && input.value !== clean) {
-                input.value = clean;
-            }
-        }
-
         _ensureRetroLogo() {
             const logoLink = document.querySelector('ytd-topbar-logo-renderer a#logo');
-            if (!logoLink || logoLink.querySelector('.wbt-retro-logo')) return;
+            if (!logoLink) return;
 
-            const style = window.getComputedStyle(logoLink, '::before');
-            if (style && style.content && style.content !== 'none' && style.content !== '""') return;
+            const customUrl = Store.getCustomLogo();
+            const existing = logoLink.querySelector('.wbt-retro-logo');
+
+            // If custom logo changed, remove old one to rebuild
+            if (existing && customUrl && !existing.querySelector('img')) existing.remove();
+            if (existing && !customUrl && existing.querySelector('img')) existing.remove();
+            if (logoLink.querySelector('.wbt-retro-logo')) return;
+
+            // Toggle CSS pseudo-elements based on custom logo
+            if (customUrl) {
+                logoLink.classList.add('wbt-has-custom-logo');
+            } else {
+                logoLink.classList.remove('wbt-has-custom-logo');
+                // Check if CSS pseudo-elements are working
+                const style = window.getComputedStyle(logoLink, '::before');
+                if (style && style.content && style.content !== 'none' && style.content !== '""') return;
+            }
 
             const logo = document.createElement('span');
             logo.className = 'wbt-retro-logo';
-            logo.style.cssText = 'display:flex;align-items:center;font-family:Arial,Helvetica,sans-serif;font-size:20px;font-weight:bold;';
+            logo.style.cssText = 'display:flex;align-items:center;';
 
-            const you = document.createElement('span');
-            you.textContent = 'You';
-            you.className = 'wbt-logo-you';
+            if (customUrl) {
+                const img = document.createElement('img');
+                img.src = customUrl;
+                img.style.cssText = 'height:20px;width:auto;object-fit:contain;';
+                logo.appendChild(img);
+            } else {
+                logo.style.cssText += 'font-family:Arial,Helvetica,sans-serif;font-size:20px;font-weight:bold;';
+                const you = document.createElement('span');
+                you.textContent = 'You';
+                you.className = 'wbt-logo-you';
+                const tube = document.createElement('span');
+                tube.textContent = 'Tube';
+                tube.style.cssText = 'color:#fff;background:#cc0000;border-radius:4px;padding:2px 6px;margin-left:1px;';
+                logo.appendChild(you);
+                logo.appendChild(tube);
+            }
 
-            const tube = document.createElement('span');
-            tube.textContent = 'Tube';
-            tube.style.cssText = 'color:#fff;background:#cc0000;border-radius:4px;padding:2px 6px;margin-left:1px;';
-
-            logo.appendChild(you);
-            logo.appendChild(tube);
             logoLink.appendChild(logo);
         }
 
@@ -2362,6 +2379,13 @@
                 ytd-topbar-menu-button-renderer:has(button[aria-label*="Gemini"]),
                 ytd-topbar-menu-button-renderer:has(button[aria-label*="gemini"]),
                 ytd-topbar-menu-button-renderer:has(button[aria-label*="AI"]),
+                ytd-topbar-menu-button-renderer:has([class*="gemini"]),
+                ytd-topbar-menu-button-renderer:has([class*="Gemini"]),
+                ytd-topbar-menu-button-renderer:has(yt-icon[icon="youtube_gemini_sparkle"]),
+                ytd-topbar-menu-button-renderer:has(path[d*="M12 2C6.48"]),
+                tp-yt-iron-icon[icon="youtube_gemini_sparkle"],
+                [class*="gemini-promo"],
+                [class*="gemini-entry"],
                 ytd-notification-topbar-button-renderer,
                 ytd-topbar-logo-renderer #country-code,
                 ytd-topbar-menu-button-renderer:has(a[href*="premium"]) {
@@ -2407,6 +2431,11 @@
                 }
                 html[dark] .wbt-logo-you {
                     color: #fff;
+                }
+                /* Hide pseudo-elements when custom logo is uploaded */
+                ytd-topbar-logo-renderer a#logo.wbt-has-custom-logo::before,
+                ytd-topbar-logo-renderer a#logo.wbt-has-custom-logo::after {
+                    display: none !important;
                 }
 
                 /* 2009 rectangular search bar */
@@ -2546,6 +2575,141 @@
                 ytd-guide-renderer #footer {
                     display: none !important;
                 }
+
+                /* === Video page: flatten like/dislike/subscribe/share === */
+
+                /* Kill all rounded buttons on watch page */
+                yt-button-shape button,
+                yt-button-shape a,
+                ytd-button-renderer button,
+                ytd-button-renderer a,
+                ytd-toggle-button-renderer button,
+                ytd-subscribe-button-renderer button,
+                #subscribe-button button,
+                #subscribe-button yt-button-shape button,
+                .yt-spec-button-shape-next,
+                tp-yt-paper-button {
+                    border-radius: 0 !important;
+                }
+
+                /* Like/dislike segmented button */
+                ytd-segmented-like-dislike-button-renderer,
+                like-button-view-model,
+                dislike-button-view-model,
+                .YtLikeButtonViewModelHost,
+                .YtDislikeButtonViewModelHost {
+                    border-radius: 0 !important;
+                }
+                ytd-segmented-like-dislike-button-renderer .yt-spec-button-shape-next,
+                like-button-view-model .yt-spec-button-shape-next,
+                dislike-button-view-model .yt-spec-button-shape-next {
+                    border-radius: 0 !important;
+                }
+
+                /* Subscribe button flat */
+                ytd-subscribe-button-renderer,
+                yt-subscribe-button-view-model,
+                .yt-spec-button-shape-next--filled {
+                    border-radius: 0 !important;
+                }
+
+                /* Share, clip, save, thanks buttons */
+                ytd-menu-renderer yt-button-shape,
+                #top-level-buttons-computed yt-button-shape,
+                #flexible-item-buttons yt-button-shape {
+                    border-radius: 0 !important;
+                }
+                ytd-menu-renderer yt-button-shape button,
+                #top-level-buttons-computed yt-button-shape button,
+                #flexible-item-buttons yt-button-shape button {
+                    border-radius: 0 !important;
+                }
+
+                /* Description box */
+                ytd-text-inline-expander,
+                #description-inner,
+                ytd-watch-metadata #description,
+                #above-the-fold #description,
+                tp-yt-paper-dialog {
+                    border-radius: 0 !important;
+                }
+
+                /* Comment input and chips */
+                #comment-dialog tp-yt-paper-input-container,
+                #contenteditable-root,
+                #simplebox-placeholder,
+                ytd-comments-header-renderer #sort-menu yt-sort-filter-sub-menu-renderer,
+                ytd-comment-simplebox-renderer {
+                    border-radius: 0 !important;
+                }
+
+                /* Channel avatar — square */
+                #owner #avatar img,
+                #owner yt-img-shadow,
+                ytd-video-owner-renderer #avatar img,
+                ytd-video-owner-renderer yt-img-shadow {
+                    border-radius: 0 !important;
+                }
+
+                /* Chips/pills on watch page */
+                yt-chip-cloud-chip-renderer,
+                ytd-search-filter-renderer {
+                    border-radius: 0 !important;
+                }
+
+                /* Kill Gemini on video page */
+                ytd-watch-metadata [class*="gemini"],
+                ytd-watch-flexy [class*="gemini"],
+                #cinematics,
+                [class*="sparkle"],
+                ytd-menu-renderer ytd-button-renderer:has([aria-label*="Gemini"]),
+                ytd-menu-renderer ytd-button-renderer:has([aria-label*="gemini"]),
+                ytd-menu-renderer yt-button-shape:has([aria-label*="Gemini"]),
+                ytd-menu-renderer yt-button-shape:has([aria-label*="gemini"]) {
+                    display: none !important;
+                }
+
+                /* === Panel collapse FAB === */
+                .wbt-fab {
+                    position: fixed;
+                    bottom: 16px;
+                    right: 16px;
+                    width: 36px;
+                    height: 36px;
+                    background: #cc0000;
+                    color: #fff;
+                    border: none;
+                    cursor: pointer;
+                    z-index: 99999;
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 11px;
+                    font-weight: bold;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                }
+                .wbt-fab:hover {
+                    background: #aa0000;
+                }
+
+                /* Logo upload section */
+                .wbt-logo-preview {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    margin-bottom: 8px;
+                }
+                .wbt-logo-preview img {
+                    max-height: 24px;
+                    max-width: 120px;
+                    object-fit: contain;
+                    background: repeating-conic-gradient(#808080 0% 25%, transparent 0% 50%) 50% / 8px 8px;
+                }
+                .wbt-logo-actions {
+                    display: flex;
+                    gap: 4px;
+                }
             `);
         }
     }
@@ -2563,13 +2727,22 @@
         }
 
         init() {
-            // Remove existing panel if re-injecting
+            // Remove existing panel/fab if re-injecting
             const existing = document.getElementById('wbt-panel');
             if (existing) existing.remove();
+            const existingFab = document.getElementById('wbt-fab');
+            if (existingFab) existingFab.remove();
 
             this._build();
+            this._buildFab();
             this._attachDragHandler();
             this._startClockTicker();
+
+            // Apply collapsed state
+            if (Store.isCollapsed()) {
+                this.panel.style.display = 'none';
+                document.getElementById('wbt-fab').style.display = 'flex';
+            }
         }
 
         _startClockTicker() {
@@ -2586,6 +2759,19 @@
                     display.style.display = 'block';
                 }
             }, 1000);
+        }
+
+        _buildFab() {
+            const fab = _el('button', 'wbt-fab', 'WBT');
+            fab.id = 'wbt-fab';
+            fab.title = 'Open WayBackTube panel';
+            fab.style.display = 'none';
+            fab.addEventListener('click', () => {
+                Store.setCollapsed(false);
+                this.panel.style.display = '';
+                fab.style.display = 'none';
+            });
+            document.body.appendChild(fab);
         }
 
         // --- Build (pure DOM, no innerHTML — Trusted Types safe) ---
@@ -2612,9 +2798,13 @@
             const minBtn = _el('button', 'wbt-panel-btn', minimized ? '+' : '\u2013');
             minBtn.id = 'wbt-minimize';
             minBtn.title = 'Minimize';
+            const collapseBtn = _el('button', 'wbt-panel-btn', 'X');
+            collapseBtn.id = 'wbt-collapse';
+            collapseBtn.title = 'Collapse to button';
             controls.appendChild(statusBadge);
             controls.appendChild(toggleBtn);
             controls.appendChild(minBtn);
+            controls.appendChild(collapseBtn);
             header.appendChild(controls);
             this.panel.appendChild(header);
 
@@ -2649,6 +2839,38 @@
             clockRow.appendChild(clockDisplay);
 
             body.appendChild(this._buildSection('Date', 'date', true, [dateInput, presets, clockRow]));
+
+            // --- Logo section ---
+            const logoContainer = _el('div', null);
+            const logoPreview = _el('div', 'wbt-logo-preview');
+            logoPreview.id = 'wbt-logo-preview';
+            const currentLogo = Store.getCustomLogo();
+            if (currentLogo) {
+                const prevImg = document.createElement('img');
+                prevImg.src = currentLogo;
+                logoPreview.appendChild(prevImg);
+            } else {
+                logoPreview.appendChild(_el('span', null, 'Default (YouΤube text)'));
+                logoPreview.style.cssText = 'color:#666;font-size:11px;';
+            }
+            logoContainer.appendChild(logoPreview);
+
+            const logoActions = _el('div', 'wbt-logo-actions');
+            const logoFileInput = document.createElement('input');
+            logoFileInput.type = 'file';
+            logoFileInput.accept = 'image/png,image/gif,image/webp,image/svg+xml';
+            logoFileInput.id = 'wbt-logo-file';
+            logoFileInput.style.display = 'none';
+            const uploadBtn = _el('button', 'wbt-preset-btn', 'Upload PNG');
+            uploadBtn.id = 'wbt-logo-upload';
+            const clearBtn = _el('button', 'wbt-preset-btn', 'Clear');
+            clearBtn.id = 'wbt-logo-clear';
+            logoActions.appendChild(logoFileInput);
+            logoActions.appendChild(uploadBtn);
+            logoActions.appendChild(clearBtn);
+            logoContainer.appendChild(logoActions);
+
+            body.appendChild(this._buildSection('Logo', 'logo', false, [logoContainer]));
 
             // --- Subscriptions section ---
             const subInput = document.createElement('input');
@@ -2743,6 +2965,42 @@
                 body.style.display = isHidden ? '' : 'none';
                 btn.textContent = isHidden ? '\u2013' : '+';
                 Store.setMinimized(!isHidden);
+            });
+
+            // Collapse to FAB
+            this.panel.querySelector('#wbt-collapse').addEventListener('click', () => {
+                Store.setCollapsed(true);
+                this.panel.style.display = 'none';
+                const fab = document.getElementById('wbt-fab');
+                if (fab) fab.style.display = 'flex';
+            });
+
+            // Logo upload
+            this.panel.querySelector('#wbt-logo-upload').addEventListener('click', () => {
+                this.panel.querySelector('#wbt-logo-file').click();
+            });
+            this.panel.querySelector('#wbt-logo-file').addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                    Store.setCustomLogo(reader.result);
+                    // Remove existing logo so it rebuilds
+                    const existing = document.querySelector('.wbt-retro-logo');
+                    if (existing) existing.remove();
+                    this._refreshLogoPreview();
+                    this._toast('Logo updated', 'success');
+                };
+                reader.readAsDataURL(file);
+            });
+            this.panel.querySelector('#wbt-logo-clear').addEventListener('click', () => {
+                Store.clearCustomLogo();
+                const existing = document.querySelector('.wbt-retro-logo');
+                if (existing) existing.remove();
+                const logoLink = document.querySelector('ytd-topbar-logo-renderer a#logo');
+                if (logoLink) logoLink.classList.remove('wbt-has-custom-logo');
+                this._refreshLogoPreview();
+                this._toast('Logo reset to default', 'success');
             });
 
             // Section toggles
@@ -3105,6 +3363,24 @@
             }
         }
 
+        // --- Logo preview ---
+
+        _refreshLogoPreview() {
+            const preview = this.panel.querySelector('#wbt-logo-preview');
+            if (!preview) return;
+            _clear(preview);
+            const currentLogo = Store.getCustomLogo();
+            if (currentLogo) {
+                const img = document.createElement('img');
+                img.src = currentLogo;
+                preview.appendChild(img);
+                preview.style.cssText = '';
+            } else {
+                preview.appendChild(_el('span', null, 'Default (YouTube text)'));
+                preview.style.cssText = 'color:#666;font-size:11px;';
+            }
+        }
+
         // --- Refresh all ---
 
         _refreshAllLists() {
@@ -3140,7 +3416,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v113...');
+            console.log('[WayBackTube] Initializing v114...');
 
             // Sync clock with external time source (non-blocking)
             App._syncTime();
@@ -3163,9 +3439,9 @@
             // Build UI panel
             uiPanel.init();
 
-            // Re-inject panel if YouTube nukes it (SPA navigation can destroy elements)
+            // Re-inject panel/fab if YouTube nukes them (SPA navigation can destroy elements)
             setInterval(() => {
-                if (!document.getElementById('wbt-panel')) {
+                if (!document.getElementById('wbt-panel') && !document.getElementById('wbt-fab')) {
                     console.log('[WayBackTube] Panel was removed, re-injecting...');
                     uiPanel.init();
                 }
