@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      116
+// @version      117
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -359,34 +359,99 @@
     class YouTubeAPI {
         constructor() {
             this._lastRequest = 0;
+            this._configCache = null;
+            this._configCacheTs = 0;
+        }
+
+        // --- Cookie helper ---
+
+        _getCookie(name) {
+            try {
+                const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+                const cookies = win.document.cookie;
+                const match = cookies.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+                return match ? decodeURIComponent(match[1]) : null;
+            } catch {
+                return null;
+            }
+        }
+
+        // --- SAPISIDHASH auth (required by InnerTube) ---
+
+        async _getSapisidHash(origin) {
+            const sapisid = this._getCookie('SAPISID') || this._getCookie('__Secure-3PAPISID');
+            if (!sapisid) return null;
+
+            const timestamp = Math.floor(Date.now() / 1000);
+            const input = `${timestamp} ${sapisid} ${origin}`;
+
+            try {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(input);
+                const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                return `SAPISIDHASH ${timestamp}_${hash}`;
+            } catch {
+                return null;
+            }
         }
 
         // --- InnerTube config ---
 
         _getConfig() {
+            // Cache for 60s to avoid re-reading ytcfg on every request
+            if (this._configCache && Date.now() - this._configCacheTs < 60000) {
+                return this._configCache;
+            }
+
+            let cfg = null;
             try {
                 const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-                const cfg = win.ytcfg?.data_;
-                if (cfg) {
-                    return {
-                        clientName: cfg.INNERTUBE_CLIENT_NAME || 'WEB',
-                        clientVersion: cfg.INNERTUBE_CLIENT_VERSION || '2.20241001.00.00',
-                        apiKey: cfg.INNERTUBE_API_KEY || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
-                        hl: cfg.HL || 'en',
-                        gl: cfg.GL || 'US',
-                    };
-                }
+                cfg = win.ytcfg?.data_;
             } catch { /* fallback */ }
-            return {
-                clientName: 'WEB',
-                clientVersion: '2.20241001.00.00',
-                apiKey: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
-                hl: 'en',
-                gl: 'US',
+
+            const result = {
+                clientName: cfg?.INNERTUBE_CLIENT_NAME || 'WEB',
+                clientVersion: cfg?.INNERTUBE_CLIENT_VERSION || '2.20260301.00.00',
+                apiKey: cfg?.INNERTUBE_API_KEY || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+                hl: cfg?.HL || 'en',
+                gl: cfg?.GL || 'US',
+                visitorData: cfg?.VISITOR_DATA || '',
             };
+
+            this._configCache = result;
+            this._configCacheTs = Date.now();
+            return result;
         }
 
-        // --- Core InnerTube POST ---
+        // --- Single InnerTube request (no retry) ---
+
+        _postOnce(url, fullBody, headers) {
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url,
+                    headers,
+                    data: JSON.stringify(fullBody),
+                    timeout: 15000,
+                    onload(res) {
+                        if (res.status >= 200 && res.status < 300) {
+                            try { resolve(JSON.parse(res.responseText)); }
+                            catch { reject(new Error('Invalid JSON')); }
+                        } else {
+                            const err = new Error(`InnerTube HTTP ${res.status}`);
+                            err.status = res.status;
+                            reject(err);
+                        }
+                    },
+                    onerror() { reject(new Error('Network error')); },
+                    ontimeout() { reject(new Error('Request timed out (15s)')); },
+                });
+            });
+        }
+
+        // --- Core InnerTube POST with auth + retry ---
 
         async _post(endpoint, body) {
             await this._rateLimit();
@@ -394,36 +459,68 @@
             const cfg = this._getConfig();
             const url = `https://www.youtube.com/youtubei/v1/${endpoint}?key=${cfg.apiKey}&prettyPrint=false`;
 
+            const clientContext = {
+                clientName: cfg.clientName,
+                clientVersion: cfg.clientVersion,
+                hl: cfg.hl,
+                gl: cfg.gl,
+            };
+            if (cfg.visitorData) {
+                clientContext.visitorData = cfg.visitorData;
+            }
+
             const fullBody = {
-                context: {
-                    client: {
-                        clientName: cfg.clientName,
-                        clientVersion: cfg.clientVersion,
-                        hl: cfg.hl,
-                        gl: cfg.gl,
-                    },
-                },
+                context: { client: clientContext },
                 ...body,
             };
 
-            return new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: 'POST',
-                    url,
-                    headers: { 'Content-Type': 'application/json' },
-                    data: JSON.stringify(fullBody),
-                    onload(res) {
-                        if (res.status >= 200 && res.status < 300) {
-                            try { resolve(JSON.parse(res.responseText)); }
-                            catch { reject(new Error('Invalid JSON')); }
-                        } else {
-                            reject(new Error(`InnerTube HTTP ${res.status}`));
-                        }
-                    },
-                    onerror() { reject(new Error('Network error')); },
-                    ontimeout() { reject(new Error('Timeout')); },
-                });
-            });
+            const headers = {
+                'Content-Type': 'application/json',
+                'X-YouTube-Client-Name': '1',
+                'X-YouTube-Client-Version': cfg.clientVersion,
+                'X-Origin': 'https://www.youtube.com',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
+            };
+
+            // Add SAPISIDHASH auth if available
+            const authHeader = await this._getSapisidHash('https://www.youtube.com');
+            if (authHeader) {
+                headers['Authorization'] = authHeader;
+                headers['X-Goog-AuthUser'] = '0';
+            }
+
+            // First attempt
+            try {
+                return await this._postOnce(url, fullBody, headers);
+            } catch (err) {
+                // Retry once on 403 or 5xx after a short delay
+                if (err.status === 403 || (err.status >= 500 && err.status < 600)) {
+                    console.warn(`[WayBackTube] ${endpoint} got ${err.status}, retrying in 1s...`);
+                    // Invalidate config cache in case key/version changed
+                    this._configCache = null;
+                    await new Promise(r => setTimeout(r, 1000));
+
+                    // Re-fetch config and rebuild auth
+                    const cfg2 = this._getConfig();
+                    const url2 = `https://www.youtube.com/youtubei/v1/${endpoint}?key=${cfg2.apiKey}&prettyPrint=false`;
+                    headers['X-YouTube-Client-Version'] = cfg2.clientVersion;
+                    const auth2 = await this._getSapisidHash('https://www.youtube.com');
+                    if (auth2) headers['Authorization'] = auth2;
+
+                    const clientContext2 = {
+                        clientName: cfg2.clientName,
+                        clientVersion: cfg2.clientVersion,
+                        hl: cfg2.hl,
+                        gl: cfg2.gl,
+                    };
+                    if (cfg2.visitorData) clientContext2.visitorData = cfg2.visitorData;
+                    fullBody.context.client = clientContext2;
+
+                    return await this._postOnce(url2, fullBody, headers);
+                }
+                throw err;
+            }
         }
 
         async _rateLimit() {
@@ -832,16 +929,38 @@
         // --- Public API ---
 
         async buildHomeFeed(selectedDate) {
+            // Wrap the entire feed build in a 30s timeout so loading can't hang forever
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Feed build timed out (30s)')), 30000)
+            );
+            return Promise.race([this._buildHomeFeedInner(selectedDate), timeoutPromise]);
+        }
+
+        async _buildHomeFeedInner(selectedDate) {
             const dateWindow = this._dateWindow(selectedDate);
             const total = CONFIG.feed.maxHomepageVideos;
 
             // Fetch all 4 sources in parallel (per-source caches still speed this up)
-            const [subscriptions, searchTerms, categories, topics] = await Promise.all([
+            // Use allSettled so one failing source doesn't kill the whole feed
+            const results = await Promise.allSettled([
                 this._fetchSubscriptions(dateWindow, Math.round(total * CONFIG.feed.weights.subscriptions * 2)),
                 this._fetchSearchTerms(dateWindow, Math.round(total * CONFIG.feed.weights.searchTerms * 2)),
                 this._fetchCategories(dateWindow, Math.round(total * CONFIG.feed.weights.categories * 2)),
                 this._fetchTopics(dateWindow, Math.round(total * CONFIG.feed.weights.topics * 2)),
             ]);
+
+            const subscriptions = results[0].status === 'fulfilled' ? results[0].value : [];
+            const searchTerms  = results[1].status === 'fulfilled' ? results[1].value : [];
+            const categories   = results[2].status === 'fulfilled' ? results[2].value : [];
+            const topics       = results[3].status === 'fulfilled' ? results[3].value : [];
+
+            // Log which sources failed so we can debug
+            const names = ['subscriptions', 'searchTerms', 'categories', 'topics'];
+            results.forEach((r, i) => {
+                if (r.status === 'rejected') {
+                    console.warn(`[WayBackTube] ${names[i]} fetch failed:`, r.reason?.message || r.reason);
+                }
+            });
 
             // Mix and deduplicate
             const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics });
@@ -1362,6 +1481,7 @@
 
         async _refreshHomepage() {
             this._homepageReplaced = false;
+            this._homepageLoading = false;
             const container = document.querySelector('.wbt-container');
             if (container) container.remove();
 
@@ -3558,7 +3678,29 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v116...');
+            console.log('[WayBackTube] Initializing v117...');
+
+            // Validate time offset isn't insane (max 24h drift)
+            const offset = Store.getTimeOffset();
+            if (Math.abs(offset) > 86400000) {
+                console.warn('[WayBackTube] Time offset was insane (' + offset + 'ms), resetting to 0');
+                Store.setTimeOffset(0);
+            }
+
+            // Clear ALL caches on version upgrade (prevents stale data from broken versions)
+            const lastVersion = Store._get('wbt_last_version', 0);
+            if (lastVersion < 117) {
+                console.log('[WayBackTube] Version upgrade detected, clearing all caches...');
+                try {
+                    const allKeys = GM_listValues();
+                    for (const key of allKeys) {
+                        if (key.startsWith('wbt_cache_')) GM_deleteValue(key);
+                    }
+                } catch (e) {
+                    console.warn('[WayBackTube] Cache clear failed:', e);
+                }
+                Store._set('wbt_last_version', 117);
+            }
 
             // Sync clock with external time source (non-blocking)
             App._syncTime();
@@ -3596,8 +3738,9 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] Ready. Date:', Store.getCurrentDate(),
-                '| Active:', Store.isActive(), '| Clock:', Store.isClockActive());
+            console.log('[WayBackTube] v117 Ready. Date:', Store.getCurrentDate(),
+                '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
+                '| TimeOffset:', Store.getTimeOffset());
         }
 
         // Sync with external time source to handle PC being off
@@ -3610,8 +3753,14 @@
                     onload(res) {
                         try {
                             const data = JSON.parse(res.responseText);
+                            if (!data || !data.unixtime) return;
                             const serverTime = data.unixtime * 1000;
                             const drift = serverTime - Date.now();
+                            // Cap drift at 24 hours — anything beyond is likely garbage
+                            if (Math.abs(drift) > 86400000) {
+                                console.warn('[WayBackTube] Time API returned suspicious drift, ignoring');
+                                return;
+                            }
                             Store.setTimeOffset(Math.abs(drift) > 30000 ? drift : 0);
                             if (Math.abs(drift) > 30000) {
                                 console.log(`[WayBackTube] Clock drift corrected: ${Math.round(drift / 1000)}s`);
