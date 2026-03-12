@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      114
+// @version      115
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -279,24 +279,31 @@
         }
 
         // Date object + reference date → "1 year ago"
-        static relativeToDate(publishDate, referenceDate) {
+        // Never returns "just now" — minimum is "1 day ago"
+        static relativeToDate(publishDate, referenceDate, videoId) {
             const diffMs = new Date(referenceDate).getTime() - new Date(publishDate).getTime();
-            if (diffMs < 0) return 'just now';
+
+            if (diffMs < 0) {
+                // Future date — use hash spread to fake a plausible age
+                const h = videoId ? this._hash(videoId) : this._hash(String(publishDate));
+                const d = (h % 13) + 1;
+                return d === 1 ? '1 day ago' : `${d} days ago`;
+            }
 
             const days = Math.floor(diffMs / 86400000);
             const years = Math.floor(days / 365.25);
             const months = Math.floor(days / 30.44);
             const weeks = Math.floor(days / 7);
             const hours = Math.floor(diffMs / 3600000);
-            const minutes = Math.floor(diffMs / 60000);
 
             if (years >= 1)   return years === 1 ? '1 year ago' : `${years} years ago`;
             if (months >= 1)  return months === 1 ? '1 month ago' : `${months} months ago`;
             if (weeks >= 1)   return weeks === 1 ? '1 week ago' : `${weeks} weeks ago`;
             if (days >= 1)    return days === 1 ? '1 day ago' : `${days} days ago`;
             if (hours >= 1)   return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
-            if (minutes >= 1) return minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
-            return 'just now';
+
+            // Less than 1 hour — show as "1 day ago" (never "just now" or minutes)
+            return '1 day ago';
         }
 
         // One-shot: InnerTube relative text → text relative to set date
@@ -319,36 +326,22 @@
             return Math.abs(h);
         }
 
-        // For WBT feed cards: InnerTube's coarse "X years ago" text has no
-        // sub-year precision, so videos near the set date all resolve to
-        // "just now". Instead, use the real recalculation when it produces a
-        // meaningful result (> 1 month), and fall back to a deterministic
-        // hash-based spread (1 day – 3 weeks) for near-zero diffs.
+        // For WBT feed cards: use real recalculation when meaningful,
+        // otherwise hash-spread for variety (1 day – 3 weeks).
         static recalcForFeed(innertubeText, setDateStr, videoId) {
             if (!setDateStr || !innertubeText) return innertubeText || '';
             const pub = this.approxPublishDate(innertubeText);
             if (!pub) return innertubeText;
 
             const prefix = /^Streamed\s+/i.test(innertubeText) ? 'Streamed ' : '';
-            const real = this.relativeToDate(pub, setDateStr);
+            const real = this.relativeToDate(pub, setDateStr, videoId);
 
-            // If recalculation gives a meaningful result (≥ 1 month), use it
-            if (real !== 'just now' && !real.endsWith('days ago') && !real.endsWith('day ago')
-                && !real.endsWith('weeks ago') && !real.endsWith('week ago')
-                && !real.endsWith('hours ago') && !real.endsWith('hour ago')
-                && !real.endsWith('minutes ago') && !real.endsWith('minute ago')) {
-                // It's months or years — precision is fine
+            // If recalculation gives months/years precision, use it
+            if (real.includes('year') || real.includes('month')) {
                 return prefix + real;
             }
 
-            // If we got a real result with day/week precision, use it directly
-            if (real !== 'just now') {
-                return prefix + real;
-            }
-
-            // Near-zero diff: InnerTube's year-level granularity can't
-            // distinguish dates within the same period. Use videoId hash
-            // to produce a realistic spread for the feed.
+            // For day/week/hour results, use hash-spread for feed variety
             const h = this._hash(videoId || innertubeText);
             const spreadDays = (h % 20) + 1; // 1–20 days ago
             if (spreadDays <= 1)  return prefix + '1 day ago';
@@ -684,16 +677,18 @@
             const cached = Store.getCacheEntry(cacheKey);
             if (cached) return cached;
 
-            const perChannel = Math.max(5, Math.ceil(count / subs.length));
+            const totalWeight = subs.reduce((sum, s) => sum + (s.weight || 3), 0);
             const batches = await Promise.allSettled(
-                subs.map(sub =>
-                    this.api.getChannelVideos(sub.name, {
+                subs.map(sub => {
+                    const w = sub.weight || 3;
+                    const perChannel = Math.max(3, Math.ceil(count * w / totalWeight));
+                    return this.api.getChannelVideos(sub.name, {
                         publishedAfter: dateWindow.after,
                         publishedBefore: dateWindow.before,
                         maxResults: perChannel,
                         order: 'date',
-                    })
-                )
+                    });
+                })
             );
 
             const videos = batches
@@ -760,23 +755,27 @@
         }
 
         async _fetchTopics(dateWindow, count) {
-            const topics = Store.getTopics();
+            const raw = Store.getTopics();
+            // Normalize legacy string format to { name, weight }
+            const topics = raw.map(t => typeof t === 'string' ? { name: t, weight: 3 } : t);
             if (!topics.length) return [];
 
             const cacheKey = `topics_${dateWindow.center.toDateString()}`;
             const cached = Store.getCacheEntry(cacheKey);
             if (cached) return cached;
 
-            const perTopic = Math.max(5, Math.ceil(count / topics.length));
+            const totalWeight = topics.reduce((sum, t) => sum + (t.weight || 3), 0);
             const batches = await Promise.allSettled(
-                topics.map(topic =>
-                    this.api.searchVideos(topic, {
+                topics.map(topic => {
+                    const w = topic.weight || 3;
+                    const perTopic = Math.max(3, Math.ceil(count * w / totalWeight));
+                    return this.api.searchVideos(topic.name || topic, {
                         publishedAfter: dateWindow.after,
                         publishedBefore: dateWindow.before,
                         maxResults: perTopic,
                         order: 'viewCount',
-                    })
-                )
+                    });
+                })
             );
 
             const videos = batches
@@ -1208,8 +1207,9 @@
             // Hide Shorts entries in sidebar navigation
             for (const el of document.querySelectorAll('ytd-guide-entry-renderer, ytd-mini-guide-entry-renderer')) {
                 if (el.dataset.wbtHidden) continue;
-                const link = el.querySelector('a[href="/shorts"]');
-                if (link) {
+                const link = el.querySelector('a[href="/shorts"], a[href*="shorts"], a[title="Shorts"]');
+                const text = el.textContent || '';
+                if (link || text.trim() === 'Shorts') {
                     el.style.display = 'none';
                     el.dataset.wbtHidden = '1';
                 }
@@ -1308,16 +1308,25 @@
                 this.displayedIndex = 0;
                 const initialBatch = this._showMoreVideos(videoGrid, CONFIG.feed.initialBatchSize);
 
-                // Load more button
+                // Infinite scroll sentinel
                 if (this.displayedIndex < this.allVideos.length) {
-                    const loadMore = VideoRenderer.loadMoreButton(() => {
-                        const moreBatch = this._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
-                        this._enrichCardDates(moreBatch); // fetch real dates for new batch
+                    const sentinel = _el('div', 'wbt-sentinel');
+                    sentinel.style.height = '1px';
+                    container.appendChild(sentinel);
+
+                    const loadNext = () => {
                         if (this.displayedIndex >= this.allVideos.length) {
-                            loadMore.style.display = 'none';
+                            sentinel.style.display = 'none';
+                            return;
                         }
-                    });
-                    container.appendChild(loadMore);
+                        const moreBatch = this._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
+                        this._enrichCardDates(moreBatch);
+                    };
+
+                    const observer = new IntersectionObserver((entries) => {
+                        if (entries[0].isIntersecting) loadNext();
+                    }, { rootMargin: '600px' });
+                    observer.observe(sentinel);
                 }
 
                 this._homepageReplaced = true;
@@ -2292,6 +2301,40 @@
                     background: #a00;
                 }
 
+                /* Weight controls */
+                .wbt-weight-ctrl {
+                    display: flex;
+                    align-items: center;
+                    gap: 2px;
+                    flex-shrink: 0;
+                    margin-left: 4px;
+                }
+                .wbt-weight-btn {
+                    background: #444;
+                    border: none;
+                    color: #ccc;
+                    width: 16px;
+                    height: 16px;
+                    font-size: 10px;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 0;
+                    line-height: 1;
+                }
+                .wbt-weight-btn:hover {
+                    background: #666;
+                    color: #fff;
+                }
+                .wbt-weight-label {
+                    font-size: 10px;
+                    color: #4caf50;
+                    font-weight: bold;
+                    min-width: 10px;
+                    text-align: center;
+                }
+
                 /* Categories checkboxes */
                 .wbt-cat-grid {
                     display: grid;
@@ -3142,7 +3185,7 @@
                     return;
                 }
 
-                subs.push({ id: ch.id, name: ch.name });
+                subs.push({ id: ch.id, name: ch.name, weight: 3 });
                 Store.setSubscriptions(subs);
                 input.value = '';
                 this._refreshSubsList();
@@ -3176,6 +3219,26 @@
                 name.className = 'wbt-list-name';
                 name.textContent = sub.name;
 
+                const weightCtrl = _el('div', 'wbt-weight-ctrl');
+                const wDown = _el('button', 'wbt-weight-btn', '-');
+                const wLabel = _el('span', 'wbt-weight-label', String(sub.weight || 3));
+                const wUp = _el('button', 'wbt-weight-btn', '+');
+                wDown.addEventListener('click', () => {
+                    const s = Store.getSubscriptions();
+                    s[i].weight = Math.max(1, (s[i].weight || 3) - 1);
+                    Store.setSubscriptions(s);
+                    this._refreshSubsList();
+                });
+                wUp.addEventListener('click', () => {
+                    const s = Store.getSubscriptions();
+                    s[i].weight = Math.min(5, (s[i].weight || 3) + 1);
+                    Store.setSubscriptions(s);
+                    this._refreshSubsList();
+                });
+                weightCtrl.appendChild(wDown);
+                weightCtrl.appendChild(wLabel);
+                weightCtrl.appendChild(wUp);
+
                 const btn = document.createElement('button');
                 btn.className = 'wbt-list-remove';
                 btn.textContent = 'X';
@@ -3187,6 +3250,7 @@
                 });
 
                 item.appendChild(name);
+                item.appendChild(weightCtrl);
                 item.appendChild(btn);
                 list.appendChild(item);
             });
@@ -3244,6 +3308,7 @@
                 });
 
                 item.appendChild(name);
+                item.appendChild(weightCtrl);
                 item.appendChild(btn);
                 list.appendChild(item);
             });
@@ -3290,12 +3355,13 @@
             if (!val) return;
 
             const topics = Store.getTopics();
-            if (topics.includes(val.toLowerCase())) {
+            const names = topics.map(t => (typeof t === 'string' ? t : t.name).toLowerCase());
+            if (names.includes(val.toLowerCase())) {
                 this._toast('Topic already exists', 'error');
                 return;
             }
 
-            topics.push(val);
+            topics.push({ name: val, weight: 3 });
             Store.setTopics(topics);
             input.value = '';
             this._refreshTopicsList();
@@ -3315,13 +3381,36 @@
                 return;
             }
 
-            topics.forEach((topic, i) => {
+            topics.forEach((rawTopic, i) => {
+                const topic = typeof rawTopic === 'string' ? { name: rawTopic, weight: 3 } : rawTopic;
                 const item = document.createElement('div');
                 item.className = 'wbt-list-item';
 
                 const name = document.createElement('span');
                 name.className = 'wbt-list-name';
-                name.textContent = topic;
+                name.textContent = topic.name;
+
+                const weightCtrl = _el('div', 'wbt-weight-ctrl');
+                const wDown = _el('button', 'wbt-weight-btn', '-');
+                const wLabel = _el('span', 'wbt-weight-label', String(topic.weight || 3));
+                const wUp = _el('button', 'wbt-weight-btn', '+');
+                wDown.addEventListener('click', () => {
+                    const t = Store.getTopics();
+                    if (typeof t[i] === 'string') t[i] = { name: t[i], weight: 3 };
+                    t[i].weight = Math.max(1, (t[i].weight || 3) - 1);
+                    Store.setTopics(t);
+                    this._refreshTopicsList();
+                });
+                wUp.addEventListener('click', () => {
+                    const t = Store.getTopics();
+                    if (typeof t[i] === 'string') t[i] = { name: t[i], weight: 3 };
+                    t[i].weight = Math.min(5, (t[i].weight || 3) + 1);
+                    Store.setTopics(t);
+                    this._refreshTopicsList();
+                });
+                weightCtrl.appendChild(wDown);
+                weightCtrl.appendChild(wLabel);
+                weightCtrl.appendChild(wUp);
 
                 const btn = document.createElement('button');
                 btn.className = 'wbt-list-remove';
@@ -3416,7 +3505,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v114...');
+            console.log('[WayBackTube] Initializing v115...');
 
             // Sync clock with external time source (non-blocking)
             App._syncTime();
