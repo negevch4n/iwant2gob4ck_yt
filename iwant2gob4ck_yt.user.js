@@ -2,7 +2,7 @@
 // @name         WayBackTube
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      117
+// @version      118
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -361,6 +361,22 @@
             this._lastRequest = 0;
             this._configCache = null;
             this._configCacheTs = 0;
+            this._pageFetch = null;
+            this._initPageFetch();
+        }
+
+        // --- Grab the page's native fetch (inherits YouTube's full auth context) ---
+
+        _initPageFetch() {
+            try {
+                const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+                if (win && typeof win.fetch === 'function') {
+                    this._pageFetch = win.fetch.bind(win);
+                    console.log('[WayBackTube] Using page fetch for API calls');
+                }
+            } catch (e) {
+                console.warn('[WayBackTube] Could not access page fetch:', e.message);
+            }
         }
 
         // --- Cookie helper ---
@@ -376,7 +392,7 @@
             }
         }
 
-        // --- SAPISIDHASH auth (required by InnerTube) ---
+        // --- SAPISIDHASH auth (required by InnerTube for GM_xmlhttpRequest) ---
 
         async _getSapisidHash(origin) {
             const sapisid = this._getCookie('SAPISID') || this._getCookie('__Secure-3PAPISID');
@@ -409,6 +425,11 @@
             try {
                 const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
                 cfg = win.ytcfg?.data_;
+                if (cfg) {
+                    console.log('[WayBackTube] ytcfg found: version=' + cfg.INNERTUBE_CLIENT_VERSION +
+                        ', key=' + (cfg.INNERTUBE_API_KEY || 'none').substring(0, 10) + '...' +
+                        ', visitor=' + (cfg.VISITOR_DATA ? 'yes' : 'no'));
+                }
             } catch { /* fallback */ }
 
             const result = {
@@ -425,9 +446,38 @@
             return result;
         }
 
-        // --- Single InnerTube request (no retry) ---
+        // --- Strategy 1: page fetch (inherits YouTube's own auth/cookies) ---
 
-        _postOnce(url, fullBody, headers) {
+        async _postViaFetch(url, fullBody) {
+            if (!this._pageFetch) return null;
+
+            try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 15000);
+
+                const resp = await this._pageFetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(fullBody),
+                    credentials: 'include',
+                    signal: controller.signal,
+                });
+                clearTimeout(timeout);
+
+                if (resp.ok) {
+                    return await resp.json();
+                }
+                console.warn(`[WayBackTube] page fetch HTTP ${resp.status}`);
+                return null; // fall through to GM_xmlhttpRequest
+            } catch (e) {
+                console.warn('[WayBackTube] page fetch error:', e.message);
+                return null;
+            }
+        }
+
+        // --- Strategy 2: GM_xmlhttpRequest with manual auth headers ---
+
+        _postViaGM(url, fullBody, headers) {
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
                     method: 'POST',
@@ -451,7 +501,7 @@
             });
         }
 
-        // --- Core InnerTube POST with auth + retry ---
+        // --- Core InnerTube POST: page fetch first, then GM_xmlhttpRequest ---
 
         async _post(endpoint, body) {
             await this._rateLimit();
@@ -474,6 +524,11 @@
                 ...body,
             };
 
+            // Try page's native fetch first (has YouTube's full auth context)
+            const fetchResult = await this._postViaFetch(url, fullBody);
+            if (fetchResult) return fetchResult;
+
+            // Fallback: GM_xmlhttpRequest with manual headers + SAPISIDHASH
             const headers = {
                 'Content-Type': 'application/json',
                 'X-YouTube-Client-Name': '1',
@@ -483,41 +538,38 @@
                 'Referer': 'https://www.youtube.com/',
             };
 
-            // Add SAPISIDHASH auth if available
             const authHeader = await this._getSapisidHash('https://www.youtube.com');
             if (authHeader) {
                 headers['Authorization'] = authHeader;
                 headers['X-Goog-AuthUser'] = '0';
             }
 
-            // First attempt
+            // First GM attempt
             try {
-                return await this._postOnce(url, fullBody, headers);
+                return await this._postViaGM(url, fullBody, headers);
             } catch (err) {
-                // Retry once on 403 or 5xx after a short delay
+                // Retry once on 403/5xx
                 if (err.status === 403 || (err.status >= 500 && err.status < 600)) {
                     console.warn(`[WayBackTube] ${endpoint} got ${err.status}, retrying in 1s...`);
-                    // Invalidate config cache in case key/version changed
                     this._configCache = null;
                     await new Promise(r => setTimeout(r, 1000));
 
-                    // Re-fetch config and rebuild auth
                     const cfg2 = this._getConfig();
                     const url2 = `https://www.youtube.com/youtubei/v1/${endpoint}?key=${cfg2.apiKey}&prettyPrint=false`;
                     headers['X-YouTube-Client-Version'] = cfg2.clientVersion;
                     const auth2 = await this._getSapisidHash('https://www.youtube.com');
                     if (auth2) headers['Authorization'] = auth2;
 
-                    const clientContext2 = {
+                    const ctx2 = {
                         clientName: cfg2.clientName,
                         clientVersion: cfg2.clientVersion,
                         hl: cfg2.hl,
                         gl: cfg2.gl,
                     };
-                    if (cfg2.visitorData) clientContext2.visitorData = cfg2.visitorData;
-                    fullBody.context.client = clientContext2;
+                    if (cfg2.visitorData) ctx2.visitorData = cfg2.visitorData;
+                    fullBody.context.client = ctx2;
 
-                    return await this._postOnce(url2, fullBody, headers);
+                    return await this._postViaGM(url2, fullBody, headers);
                 }
                 throw err;
             }
@@ -3678,7 +3730,7 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v117...');
+            console.log('[WayBackTube] Initializing v118...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -3689,7 +3741,7 @@
 
             // Clear ALL caches on version upgrade (prevents stale data from broken versions)
             const lastVersion = Store._get('wbt_last_version', 0);
-            if (lastVersion < 117) {
+            if (lastVersion < 118) {
                 console.log('[WayBackTube] Version upgrade detected, clearing all caches...');
                 try {
                     const allKeys = GM_listValues();
@@ -3699,7 +3751,7 @@
                 } catch (e) {
                     console.warn('[WayBackTube] Cache clear failed:', e);
                 }
-                Store._set('wbt_last_version', 117);
+                Store._set('wbt_last_version', 118);
             }
 
             // Sync clock with external time source (non-blocking)
@@ -3738,7 +3790,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v117 Ready. Date:', Store.getCurrentDate(),
+            console.log('[WayBackTube] v118 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
