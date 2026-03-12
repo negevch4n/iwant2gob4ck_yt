@@ -1311,25 +1311,32 @@
                 this.displayedIndex = 0;
                 const initialBatch = this._showMoreVideos(videoGrid, CONFIG.feed.initialBatchSize);
 
-                // Infinite scroll sentinel
+                // Infinite scroll via window scroll listener
                 if (this.displayedIndex < this.allVideos.length) {
                     const sentinel = _el('div', 'wbt-sentinel');
                     sentinel.style.height = '1px';
                     container.appendChild(sentinel);
 
-                    const loadNext = () => {
+                    let loading = false;
+                    const onScroll = () => {
+                        if (loading) return;
                         if (this.displayedIndex >= this.allVideos.length) {
                             sentinel.style.display = 'none';
+                            window.removeEventListener('scroll', onScroll);
                             return;
                         }
-                        const moreBatch = this._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
-                        this._enrichCardDates(moreBatch);
+                        const rect = sentinel.getBoundingClientRect();
+                        if (rect.top < window.innerHeight + 800) {
+                            loading = true;
+                            const moreBatch = this._showMoreVideos(videoGrid, CONFIG.feed.loadMoreSize);
+                            this._enrichCardDates(moreBatch);
+                            loading = false;
+                        }
                     };
-
-                    const observer = new IntersectionObserver((entries) => {
-                        if (entries[0].isIntersecting) loadNext();
-                    }, { rootMargin: '600px' });
-                    observer.observe(sentinel);
+                    window.addEventListener('scroll', onScroll, { passive: true });
+                    // Fire immediately in case content doesn't fill the viewport
+                    setTimeout(onScroll, 100);
+                    setTimeout(onScroll, 500);
                 }
 
                 this._homepageReplaced = true;
