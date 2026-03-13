@@ -13,7 +13,7 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      youtube.com
-// @connect      *
+// @connect      worldtimeapi.org
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js
 // @updateURL    https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js
@@ -1048,6 +1048,113 @@
             ];
         }
 
+        async buildHomeFeedMore(selectedDate, page, excludeIds) {
+            const d = new Date(selectedDate);
+            const days = CONFIG.feed.dateWindowDays;
+            // Shift the window backward: page 1 = original, page 2 = 2 weeks earlier, etc.
+            d.setDate(d.getDate() - days * 2 * (page - 1));
+            const shiftedDate = d.toISOString().split('T')[0];
+
+            const dateWindow = this._dateWindow(shiftedDate);
+            const total = CONFIG.feed.maxHomepageVideos;
+
+            const results = await Promise.allSettled([
+                this._fetchSubscriptionsUncached(dateWindow, Math.round(total * CONFIG.feed.weights.subscriptions * 2)),
+                this._fetchSearchTermsUncached(dateWindow, Math.round(total * CONFIG.feed.weights.searchTerms * 2)),
+                this._fetchCategoriesUncached(dateWindow, Math.round(total * CONFIG.feed.weights.categories * 2)),
+                this._fetchTopicsUncached(dateWindow, Math.round(total * CONFIG.feed.weights.topics * 2)),
+            ]);
+
+            const subscriptions = results[0].status === 'fulfilled' ? results[0].value : [];
+            const searchTerms  = results[1].status === 'fulfilled' ? results[1].value : [];
+            const categories   = results[2].status === 'fulfilled' ? results[2].value : [];
+            const topics       = results[3].status === 'fulfilled' ? results[3].value : [];
+
+            const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics });
+            const deduped = this._dedupe(mixed);
+
+            // Filter out already-displayed videos
+            const fresh = deduped.filter(v => !excludeIds.has(v.id));
+
+            return this._weightedShuffle(fresh, dateWindow.center);
+        }
+
+        // Uncached fetch variants for infinite scroll
+        async _fetchSubscriptionsUncached(dateWindow, count) {
+            const subs = Store.getSubscriptions();
+            if (!subs.length) return [];
+            const totalWeight = subs.reduce((sum, s) => sum + (s.weight || 3), 0);
+            const batches = await Promise.allSettled(
+                subs.map(sub => {
+                    const w = sub.weight || 3;
+                    const perChannel = Math.max(3, Math.ceil(count * w / totalWeight));
+                    return this.api.getChannelVideos(sub.name, {
+                        publishedAfter: dateWindow.after,
+                        publishedBefore: dateWindow.before,
+                        maxResults: perChannel,
+                        order: 'date',
+                    });
+                })
+            );
+            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+        }
+
+        async _fetchSearchTermsUncached(dateWindow, count) {
+            const raw = Store.getSearchTerms();
+            const terms = raw.map(t => typeof t === 'string' ? { term: t, weight: 3 } : t);
+            if (!terms.length) return [];
+            const totalWeight = terms.reduce((sum, t) => sum + (t.weight || 3), 0);
+            const batches = await Promise.allSettled(
+                terms.map(t => {
+                    const w = t.weight || 3;
+                    const perTerm = Math.max(3, Math.ceil(count * w / totalWeight));
+                    return this.api.searchVideos(t.term, {
+                        publishedAfter: dateWindow.after,
+                        publishedBefore: dateWindow.before,
+                        maxResults: perTerm,
+                        order: 'relevance',
+                    });
+                })
+            );
+            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+        }
+
+        async _fetchCategoriesUncached(dateWindow, count) {
+            const cats = Store.getCategories();
+            if (!cats.length) return [];
+            const perCat = Math.max(5, Math.ceil(count / cats.length));
+            const batches = await Promise.allSettled(
+                cats.map(catId =>
+                    this.api.getPopularByCategory(catId, {
+                        publishedAfter: dateWindow.after,
+                        publishedBefore: dateWindow.before,
+                        maxResults: perCat,
+                    })
+                )
+            );
+            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+        }
+
+        async _fetchTopicsUncached(dateWindow, count) {
+            const raw = Store.getTopics();
+            const topics = raw.map(t => typeof t === 'string' ? { name: t, weight: 3 } : t);
+            if (!topics.length) return [];
+            const totalWeight = topics.reduce((sum, t) => sum + (t.weight || 3), 0);
+            const batches = await Promise.allSettled(
+                topics.map(topic => {
+                    const w = topic.weight || 3;
+                    const perTopic = Math.max(3, Math.ceil(count * w / totalWeight));
+                    return this.api.searchVideos(topic.name || topic, {
+                        publishedAfter: dateWindow.after,
+                        publishedBefore: dateWindow.before,
+                        maxResults: perTopic,
+                        order: 'relevance',
+                    });
+                })
+            );
+            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+        }
+
         async buildRecommendations(currentVideoId, selectedDate) {
             const dateWindow = this._dateWindow(selectedDate);
             const targetCount = 30; // Show ~30 sidebar videos
@@ -1315,6 +1422,31 @@
             btn.addEventListener('click', onClick);
             return btn;
         }
+
+        static endscreenCard(video) {
+            const card = _el('div', 'wbt-endscreen-card');
+
+            const link = _el('a', 'wbt-endscreen-link');
+            link.href = `/watch?v=${video.id}`;
+
+            const thumbWrap = _el('div', 'wbt-endscreen-thumb-wrap');
+            const img = document.createElement('img');
+            img.className = 'wbt-endscreen-thumb';
+            img.src = video.thumbnail;
+            img.alt = '';
+            img.loading = 'lazy';
+            thumbWrap.appendChild(img);
+
+            const info = _el('div', 'wbt-endscreen-info', [
+                _el('div', 'wbt-endscreen-title', video.title),
+                _el('div', 'wbt-endscreen-channel', video.channel),
+            ]);
+
+            link.appendChild(thumbWrap);
+            link.appendChild(info);
+            card.appendChild(link);
+            return card;
+        }
     }
 
     // =========================================================================
@@ -1332,6 +1464,8 @@
             this._sidebarLoading = false;
             this._channelReplaced = false;
             this._channelLoading = false;
+            this._endscreenReplaced = false;
+            this._endscreenLoading = false;
             this._lastUrl = '';
             this._nukeInterval = null;
             this._observer = null;
@@ -1372,6 +1506,8 @@
             this._sidebarLoading = false;
             this._channelReplaced = false;
             this._channelLoading = false;
+            this._endscreenReplaced = false;
+            this._endscreenLoading = false;
             this._pendingSearchClean = null;
 
             if (!Store.isActive()) return;
@@ -1450,6 +1586,21 @@
                     }
                     if (!this._sidebarReplaced && !this._sidebarLoading) this._tryReplaceSidebar();
                     this._filterComments();
+
+                    // Endscreen: show WBT grid when video ends
+                    const video = document.querySelector('video.html5-main-video');
+                    if (video && video.ended) {
+                        if (!this._endscreenReplaced && !this._endscreenLoading) {
+                            this._tryReplaceEndscreen();
+                        }
+                    } else {
+                        // Video still playing or navigated — remove any endscreen overlay
+                        if (this._endscreenReplaced) {
+                            const es = document.querySelector('.wbt-endscreen-container');
+                            if (es) es.remove();
+                            this._endscreenReplaced = false;
+                        }
+                    }
                 }
                 if (this._isChannelPage()) {
                     if (this._channelReplaced && !document.querySelector('.wbt-channel-container')) {
@@ -1607,30 +1758,37 @@
                         const dateStr = Store.getCurrentDate();
                         if (!dateStr) return;
 
-                        // Fetch a fresh batch from the feed engine (clears seen filter for variety)
-                        const newVideos = await self.feedEngine.buildHomeFeed(dateStr);
+                        self._infiniteScrollPage++;
+                        const existingIds = new Set(self.allVideos.map(v => v.id));
+
+                        // Fetch from a shifted date window so we get genuinely new videos
+                        const fresh = await self.feedEngine.buildHomeFeedMore(dateStr, self._infiniteScrollPage, existingIds);
                         if (!document.body.contains(videoGrid)) return;
 
-                        // Filter out videos already on the page
-                        const existingIds = new Set(self.allVideos.map(v => v.id));
-                        const fresh = newVideos.filter(v => !existingIds.has(v.id));
-
                         if (fresh.length === 0) {
-                            // No new videos — stop infinite scroll
-                            loadingMore.textContent = 'No more videos to load';
-                            loadingMore.style.display = 'block';
-                            self._infiniteScrollActive = false;
-                            return;
+                            // Try one more page before giving up
+                            self._infiniteScrollPage++;
+                            const retry = await self.feedEngine.buildHomeFeedMore(dateStr, self._infiniteScrollPage, existingIds);
+                            if (retry.length === 0) {
+                                loadingMore.textContent = 'No more videos to load';
+                                loadingMore.style.display = 'block';
+                                self._infiniteScrollActive = false;
+                                return;
+                            }
+                            for (const video of retry) {
+                                videoGrid.appendChild(VideoRenderer.homepageCard(video));
+                                self.allVideos.push(video);
+                            }
+                            self._enrichCardDates(retry);
+                            Store.addSeenIds(retry.map(v => v.id));
+                        } else {
+                            for (const video of fresh) {
+                                videoGrid.appendChild(VideoRenderer.homepageCard(video));
+                                self.allVideos.push(video);
+                            }
+                            self._enrichCardDates(fresh);
+                            Store.addSeenIds(fresh.map(v => v.id));
                         }
-
-                        // Append new videos
-                        for (const video of fresh) {
-                            videoGrid.appendChild(VideoRenderer.homepageCard(video));
-                            self.allVideos.push(video);
-                        }
-                        self._infiniteScrollPage++;
-                        self._enrichCardDates(fresh);
-                        Store.addSeenIds(fresh.map(v => v.id));
                     } catch (e) {
                         console.warn('[WayBackTube] Infinite scroll fetch error:', e.message);
                     } finally {
@@ -1787,6 +1945,83 @@
             }
         }
 
+        // --- Video endscreen replacement ---
+
+        async _tryReplaceEndscreen() {
+            if (this._endscreenReplaced || this._endscreenLoading) return;
+
+            // Find the player container to overlay on
+            const player = document.querySelector('#movie_player, .html5-video-player');
+            if (!player) return;
+
+            // Already injected
+            if (player.querySelector('.wbt-endscreen-container')) {
+                this._endscreenReplaced = true;
+                return;
+            }
+
+            this._endscreenLoading = true;
+
+            // Hide YouTube's native endscreen elements
+            for (const sel of ['.ytp-endscreen-content', '.html5-endscreen', '.ytp-ce-element']) {
+                for (const el of player.querySelectorAll(sel)) {
+                    el.style.display = 'none';
+                }
+            }
+
+            const dateStr = Store.getCurrentDate();
+            const videoId = new URLSearchParams(location.search).get('v');
+            if (!dateStr || !videoId) {
+                this._endscreenLoading = false;
+                return;
+            }
+
+            // Create overlay container
+            const overlay = document.createElement('div');
+            overlay.className = 'wbt-endscreen-container';
+
+            const grid = document.createElement('div');
+            grid.className = 'wbt-endscreen-grid';
+
+            overlay.appendChild(VideoRenderer.loadingIndicator());
+
+            // Ensure player has position for absolute overlay
+            const playerPos = getComputedStyle(player).position;
+            if (playerPos === 'static') player.style.position = 'relative';
+
+            player.appendChild(overlay);
+
+            try {
+                const recommendations = await this.feedEngine.buildRecommendations(videoId, dateStr);
+
+                if (!document.body.contains(overlay)) {
+                    this._endscreenLoading = false;
+                    return;
+                }
+
+                _clear(overlay);
+
+                if (!recommendations.length) {
+                    overlay.remove();
+                    this._endscreenLoading = false;
+                    return;
+                }
+
+                const endscreenVideos = recommendations.slice(0, 12);
+                for (const video of endscreenVideos) {
+                    grid.appendChild(VideoRenderer.endscreenCard(video));
+                }
+
+                overlay.appendChild(grid);
+                this._endscreenReplaced = true;
+                this._endscreenLoading = false;
+            } catch (e) {
+                console.warn('[WayBackTube] Endscreen error:', e.message);
+                if (document.body.contains(overlay)) overlay.remove();
+                this._endscreenLoading = false;
+            }
+        }
+
         // --- Force reload ---
 
         forceReload() {
@@ -1796,7 +2031,9 @@
             this._sidebarLoading = false;
             this._channelReplaced = false;
             this._channelLoading = false;
-            for (const sel of ['.wbt-container', '.wbt-sidebar-container', '.wbt-channel-container']) {
+            this._endscreenReplaced = false;
+            this._endscreenLoading = false;
+            for (const sel of ['.wbt-container', '.wbt-sidebar-container', '.wbt-channel-container', '.wbt-endscreen-container']) {
                 const el = document.querySelector(sel);
                 if (el) el.remove();
             }
@@ -3087,6 +3324,86 @@
                 .wbt-logo-actions {
                     display: flex;
                     gap: 4px;
+                }
+
+                /* === WBT Endscreen Overlay === */
+
+                /* Hide YouTube's native endscreen */
+                .html5-endscreen,
+                .ytp-endscreen-content,
+                .ytp-ce-element {
+                    display: none !important;
+                }
+
+                .wbt-endscreen-container {
+                    position: absolute;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    background: rgba(0, 0, 0, 0.85);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 60;
+                    padding: 20px;
+                    box-sizing: border-box;
+                }
+
+                .wbt-endscreen-grid {
+                    display: grid;
+                    grid-template-columns: repeat(4, 1fr);
+                    gap: 12px;
+                    max-width: 900px;
+                    width: 100%;
+                }
+
+                .wbt-endscreen-card {
+                    background: transparent;
+                }
+
+                .wbt-endscreen-link {
+                    text-decoration: none;
+                    color: inherit;
+                    display: block;
+                }
+
+                .wbt-endscreen-thumb-wrap {
+                    position: relative;
+                    width: 100%;
+                    padding-bottom: 56.25%;
+                    overflow: hidden;
+                    background: #000;
+                }
+
+                .wbt-endscreen-thumb {
+                    position: absolute;
+                    top: 0; left: 0;
+                    width: 100%;
+                    height: 100%;
+                    object-fit: cover;
+                }
+
+                .wbt-endscreen-info {
+                    padding: 4px 0;
+                }
+
+                .wbt-endscreen-title {
+                    font-size: 12px;
+                    font-weight: bold;
+                    line-height: 1.3;
+                    color: #fff;
+                    display: -webkit-box;
+                    -webkit-line-clamp: 2;
+                    -webkit-box-orient: vertical;
+                    overflow: hidden;
+                    margin-bottom: 2px;
+                }
+                .wbt-endscreen-link:hover .wbt-endscreen-title {
+                    text-decoration: underline;
+                    color: #6e9fff;
+                }
+
+                .wbt-endscreen-channel {
+                    font-size: 11px;
+                    color: #aaa;
                 }
             `);
         }

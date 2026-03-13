@@ -1,48 +1,54 @@
 # WayBackTube
 
-A Tampermonkey userscript that turns YouTube into a time machine. Pick a date and YouTube becomes what it would've looked like on that day — the videos, the dates, the comments, all of it.
+Tampermonkey userscript that filters YouTube to a specific date. You pick a date, and the entire site only shows content from that time period. Homepage, search, channels, comments, everything.
 
-## What it does
+## Install
 
-You set a date (say, March 2013) and WayBackTube takes over YouTube. Your homepage fills with videos from that time period based on your subscriptions, search terms, favorite categories, and custom topics. Every "12 years ago" label gets recalculated to say "1 year ago" like it would've back then. Shorts don't exist yet in 2013, so they're gone — nuked from the sidebar, search results, channel pages, everywhere. Comments posted after your set date get hidden. Search results automatically filter to before your date. Channel pages show their uploads in order, stopping at your date.
-
-It's not a skin or a theme. It rewrites the entire experience so nothing breaks the illusion.
+1. Install [Tampermonkey](https://www.tampermonkey.net/)
+2. Click [here](https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js) to install the script
+3. Open YouTube. Control panel shows up top right.
 
 ## Features
 
-- **Time-shifted homepage** — Pulls real videos from your set date using YouTube's internal API. Subscriptions, search terms, categories, and topics all feed into the mix. Every refresh gives you a different set of videos.
-- **Date recalculation** — Every relative date on YouTube ("5 years ago", "2 months ago") gets recalculated relative to your chosen date, not today.
-- **Real publish dates** — Fetches actual upload dates from YouTube's API for accuracy instead of guessing.
-- **Rolling clock** — Optional real-time clock that advances from your set date. Leave it running and the feed refreshes every hour with "new" content.
-- **Shorts annihilation** — Removes Shorts from navigation, search, channels, feeds, and redirects /shorts URLs back to the homepage.
-- **Search filtering** — Automatically appends `before:YYYY-MM-DD` to every search so results stay in your time period.
-- **Channel pages** — Replaces channel content with a chronological grid of that channel's videos, filtered to before your date.
-- **Comment filtering** — Hides comments posted after your set date (with a 2-year grace period so comment sections aren't empty). Rewrites remaining comment dates to match.
-- **2009 YouTube styling** — Blue link titles, flat design, no rounded corners, no shadows. The way it used to look.
-- **Control panel** — Draggable panel to set the date, manage subscriptions, add search terms, pick categories, and add custom topics.
-- **Clock sync** — Syncs with an external time server so the rolling clock stays accurate even if your PC was off.
+**Homepage feed.** Pulls videos from around your selected date using YouTube's InnerTube API. Videos come from 4 configurable sources: subscriptions, search terms, categories, and custom topics. Each source has adjustable weight so you can control how much of the feed it takes up. Infinite scroll fetches more videos as you go, shifting the date window backward to keep finding new content.
 
-## Installation
+**Sidebar recommendations.** On video pages, the sidebar gets replaced with WayBackTube recommendations pulled from the same sources, filtered to the same date range. Related videos from the current video's channel and keywords are mixed in.
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser
-2. Click [here](https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js) to install the script
-3. Go to YouTube and the control panel will appear in the top right
+**Endscreen overlay.** When a video ends, YouTube's endscreen is replaced with a 3x4 grid of WayBackTube recommendations overlaid on the player.
 
-## How to use
+**Date recalculation.** All relative dates on the page ("5 years ago", "2 months ago") are recalculated relative to your chosen date, not today's date. If you set the date to 2013, a video from 2012 shows "1 year ago" instead of "13 years ago".
 
-Open YouTube. The WayBackTube panel shows up in the corner. Pick a date with the date picker or hit one of the preset buttons (1y ago, 5y ago, etc.). The homepage rebuilds with videos from that era.
+**Real publish dates.** The script fetches actual upload dates from the API in the background and updates cards as they come in.
 
-Add your favorite channels under Subscriptions so they show up in the feed. Add search terms and topics to broaden what videos appear. Check off categories you're interested in.
+**Rolling clock.** Optional clock that advances in real time from your set date. The feed auto-refreshes every hour with new content as the clock ticks forward.
 
-Hit "New Videos" on the homepage to get a fresh batch. The script tracks what you've already seen and prioritizes showing you something different.
+**Shorts removal.** Shorts are hidden everywhere: navigation, search results, channel pages, feeds, shelves. `/shorts/` URLs redirect to the homepage.
 
-If you want the full experience, hit "Start Clock" and the date will advance in real time from wherever you set it. The feed auto-refreshes every hour.
+**Search filtering.** Automatically appends `before:YYYY-MM-DD` to search queries so results stay within your time period. The filter text is hidden from the search bar so it looks normal.
+
+**Channel pages.** Replaced with a chronological grid of that channel's uploads, filtered to before your selected date.
+
+**Comment filtering.** Comments posted after your selected date are hidden. There's a 2-year grace period so comment sections aren't completely empty on older videos. Remaining comment dates are recalculated to match.
+
+**Channel blocking.** Block channels from appearing in your feed, sidebar, and endscreen.
+
+**Custom logo.** Upload a custom logo image to replace the YouTube logo in the header.
+
+**2009 visual style.** Flat UI, no rounded corners, no shadows, no animations. Blue link titles. Rectangular search bar. Classic YouTube look.
+
+**Control panel.** Draggable panel with collapsible sections for: date picker with presets (1y, 5y, 10y, 15y ago), subscriptions, search terms, categories (checkboxes), custom topics, channel block list, logo upload, and stats.
+
+**Clock sync.** Syncs with worldtimeapi.org so the rolling clock stays accurate.
 
 ## How it works
 
-WayBackTube uses YouTube's internal InnerTube API — the same API the YouTube website itself uses. No API keys needed. It searches for videos within a date window around your chosen date, mixes results from your configured sources, and renders them in a custom grid that replaces YouTube's normal homepage.
+Uses YouTube's InnerTube API (the same internal API the site uses) with `GM_xmlhttpRequest`. No YouTube Data API key needed. Authenticates using the page's existing session cookies for InnerTube requests.
 
-All DOM manipulation is done with pure element creation (no innerHTML) to comply with YouTube's Trusted Types policy. The script detects YouTube's SPA navigation and re-applies itself on every page change.
+Videos are fetched by searching within a date window (configurable, default ±7 days) around the selected date. Results from all 4 sources are mixed by weight, deduplicated, and shuffled with a bias toward videos closer to the center date.
+
+All DOM manipulation uses `document.createElement` (no innerHTML) to work with YouTube's Trusted Types CSP. The script hooks into YouTube's SPA navigation via `yt-navigate-finish` events and a URL polling fallback, re-applying all modifications on every page change. A 100ms interval continuously hides YouTube's native elements (shorts, chips, endscreens) that get re-rendered by YouTube's framework.
+
+Data is stored locally via Tampermonkey's `GM_setValue`/`GM_getValue`. Nothing is sent to any server other than YouTube and worldtimeapi.org (for clock sync).
 
 ## License
 
