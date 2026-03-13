@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      126
+// @version      127
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -167,6 +167,66 @@
         static setCollapsed(v)      { this._set('wbt_collapsed', v); }
         static getTabY()            { return this._get('wbt_tab_y', null); }
         static setTabY(v)           { this._set('wbt_tab_y', v); }
+
+        // --- Profiles ---
+        static getProfiles()        { return this._get('wbt_profiles', {}); }
+        static setProfiles(p)       { this._set('wbt_profiles', p); }
+
+        static saveProfile(name) {
+            const profiles = this.getProfiles();
+            profiles[name] = {
+                date: this.getDate(),
+                subscriptions: this.getSubscriptions(),
+                searchTerms: this.getSearchTerms(),
+                categories: this.getCategories(),
+                topics: this.getTopics(),
+                blockedChannels: this.getBlockedChannels(),
+                customLogo: this.getCustomLogo(),
+                savedAt: Date.now(),
+            };
+            this.setProfiles(profiles);
+        }
+
+        static loadProfile(name) {
+            const profiles = this.getProfiles();
+            const p = profiles[name];
+            if (!p) return false;
+            if (p.date) this.setDate(p.date);
+            if (p.subscriptions) this.setSubscriptions(p.subscriptions);
+            if (p.searchTerms) this.setSearchTerms(p.searchTerms);
+            if (p.categories) this.setCategories(p.categories);
+            if (p.topics) this.setTopics(p.topics);
+            if (p.blockedChannels) this.setBlockedChannels(p.blockedChannels);
+            if (p.customLogo) this.setCustomLogo(p.customLogo);
+            else this.clearCustomLogo();
+            // Reset clock so it doesn't carry over
+            this.stopClock();
+            return true;
+        }
+
+        static deleteProfile(name) {
+            const profiles = this.getProfiles();
+            delete profiles[name];
+            this.setProfiles(profiles);
+        }
+
+        static exportProfile(name) {
+            const profiles = this.getProfiles();
+            const p = profiles[name];
+            if (!p) return null;
+            return JSON.stringify({ name, ...p }, null, 2);
+        }
+
+        static importProfile(json) {
+            const data = JSON.parse(json);
+            const name = data.name;
+            if (!name) throw new Error('Profile has no name');
+            delete data.name;
+            const profiles = this.getProfiles();
+            profiles[name] = data;
+            this.setProfiles(profiles);
+            return name;
+        }
 
         // --- Custom logo (data URL) ---
         static getCustomLogo()      { return this._get('wbt_custom_logo', null); }
@@ -3286,6 +3346,41 @@
                     display: none !important;
                 }
 
+                /* Profile buttons */
+                .wbt-profile-actions {
+                    margin-bottom: 8px;
+                }
+                .wbt-profile-import-btn {
+                    background: #333;
+                    border: 1px solid #555;
+                    color: #ccc;
+                    padding: 4px 10px;
+                    font-size: 11px;
+                    cursor: pointer;
+                }
+                .wbt-profile-import-btn:hover {
+                    background: #444;
+                    color: #fff;
+                }
+                .wbt-profile-btns {
+                    display: flex;
+                    gap: 4px;
+                    flex-shrink: 0;
+                    margin-left: 4px;
+                }
+                .wbt-profile-action-btn {
+                    background: #333;
+                    border: 1px solid #555;
+                    color: #ccc;
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    cursor: pointer;
+                }
+                .wbt-profile-action-btn:hover {
+                    background: #444;
+                    color: #fff;
+                }
+
                 /* === Panel collapse tab === */
                 .wbt-fab {
                     position: fixed;
@@ -3669,6 +3764,28 @@
             blockList.id = 'wbt-block-list';
             body.appendChild(this._buildSection('Blocked Channels', 'block', false, [blockRow, blockList]));
 
+            // --- Profiles section ---
+            const profileNameInput = document.createElement('input');
+            profileNameInput.className = 'wbt-add-input';
+            profileNameInput.id = 'wbt-profile-name';
+            profileNameInput.placeholder = 'Profile name (e.g. 2007)';
+            const profileSaveBtn = _el('button', 'wbt-add-btn', 'Save');
+            profileSaveBtn.id = 'wbt-profile-save';
+            const profileSaveRow = _el('div', 'wbt-add-row', [profileNameInput, profileSaveBtn]);
+
+            const profileImportBtn = _el('button', 'wbt-profile-import-btn', 'Import');
+            profileImportBtn.id = 'wbt-profile-import';
+            const profileImportFile = document.createElement('input');
+            profileImportFile.type = 'file';
+            profileImportFile.accept = '.json';
+            profileImportFile.id = 'wbt-profile-file';
+            profileImportFile.style.display = 'none';
+            const profileActions = _el('div', 'wbt-profile-actions', [profileImportBtn, profileImportFile]);
+
+            const profileList = _el('div', 'wbt-list');
+            profileList.id = 'wbt-profile-list';
+            body.appendChild(this._buildSection('Profiles', 'profiles', false, [profileSaveRow, profileActions, profileList]));
+
             // --- Stats section ---
             const statsGrid = _el('div', 'wbt-stats-grid');
             statsGrid.id = 'wbt-stats';
@@ -3776,6 +3893,7 @@
                         if (id === 'cats') this._refreshCatsGrid();
                         if (id === 'topics') this._refreshTopicsList();
                         if (id === 'block') this._refreshBlockList();
+                        if (id === 'profiles') this._refreshProfileList();
                         if (id === 'stats') this._refreshStats();
                     }
                 });
@@ -3854,6 +3972,39 @@
             this.panel.querySelector('#wbt-block-add').addEventListener('click', () => this._addBlockedChannel());
             this.panel.querySelector('#wbt-block-input').addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') this._addBlockedChannel();
+            });
+
+            // Profiles
+            this.panel.querySelector('#wbt-profile-save').addEventListener('click', () => {
+                const input = this.panel.querySelector('#wbt-profile-name');
+                const name = input.value.trim();
+                if (!name) return;
+                Store.saveProfile(name);
+                input.value = '';
+                this._refreshProfileList();
+                this._toast(`Profile "${name}" saved`, 'success');
+            });
+            this.panel.querySelector('#wbt-profile-name').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this.panel.querySelector('#wbt-profile-save').click();
+            });
+            this.panel.querySelector('#wbt-profile-import').addEventListener('click', () => {
+                this.panel.querySelector('#wbt-profile-file').click();
+            });
+            this.panel.querySelector('#wbt-profile-file').addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                    try {
+                        const name = Store.importProfile(reader.result);
+                        this._refreshProfileList();
+                        this._toast(`Imported "${name}"`, 'success');
+                    } catch (err) {
+                        this._toast('Invalid profile file', 'error');
+                    }
+                };
+                reader.readAsText(file);
+                e.target.value = '';
             });
         }
 
@@ -4257,6 +4408,73 @@
             });
         }
 
+        // --- Profiles ---
+
+        _refreshProfileList() {
+            const list = this.panel.querySelector('#wbt-profile-list');
+            if (!list) return;
+            const profiles = Store.getProfiles();
+            const names = Object.keys(profiles);
+            _clear(list);
+
+            if (!names.length) {
+                const empty = _el('div', null, 'No saved profiles');
+                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                list.appendChild(empty);
+                return;
+            }
+
+            for (const name of names) {
+                const p = profiles[name];
+                const item = _el('div', 'wbt-list-item');
+
+                const label = _el('span', 'wbt-list-name');
+                label.textContent = `${name} (${p.date || '?'})`;
+
+                const btns = _el('div', 'wbt-profile-btns');
+
+                const loadBtn = _el('button', 'wbt-profile-action-btn', 'Load');
+                loadBtn.addEventListener('click', () => {
+                    Store.loadProfile(name);
+                    this.panel.querySelector('#wbt-date').value = Store.getDate() || '';
+                    this._refreshAllLists();
+                    this._refreshLogoPreview();
+                    const existing = document.querySelector('.wbt-retro-logo');
+                    if (existing) existing.remove();
+                    this.dom.forceReload();
+                    this._toast(`Loaded "${name}"`, 'success');
+                });
+
+                const exportBtn = _el('button', 'wbt-profile-action-btn', 'Export');
+                exportBtn.addEventListener('click', () => {
+                    const json = Store.exportProfile(name);
+                    if (!json) return;
+                    const blob = new Blob([json], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `iw2gb_${name}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    this._toast(`Exported "${name}"`, 'success');
+                });
+
+                const delBtn = _el('button', 'wbt-list-remove', 'X');
+                delBtn.addEventListener('click', () => {
+                    Store.deleteProfile(name);
+                    this._refreshProfileList();
+                    this._toast(`Deleted "${name}"`, 'success');
+                });
+
+                btns.appendChild(loadBtn);
+                btns.appendChild(exportBtn);
+                btns.appendChild(delBtn);
+                item.appendChild(label);
+                item.appendChild(btns);
+                list.appendChild(item);
+            }
+        }
+
         // --- Stats ---
 
         _refreshStats() {
@@ -4308,6 +4526,7 @@
             try { this._refreshCatsGrid(); } catch (e) { console.error('[iw2gb] Cats grid error:', e); }
             try { this._refreshTopicsList(); } catch (e) { console.error('[iw2gb] Topics list error:', e); }
             try { this._refreshBlockList(); } catch (e) { console.error('[iw2gb] Block list error:', e); }
+            try { this._refreshProfileList(); } catch (e) { console.error('[iw2gb] Profile list error:', e); }
             try { this._refreshStats(); } catch (e) { console.error('[iw2gb] Stats error:', e); }
         }
 
