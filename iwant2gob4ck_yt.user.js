@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      131
+// @version      133
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -42,10 +42,11 @@
             initialBatchSize: 16,
             loadMoreSize: 12,
             weights: {
-                subscriptions: 0.40,
-                searchTerms: 0.20,
-                categories: 0.25,
-                topics: 0.15,
+                subscriptions: 0.35,
+                searchTerms: 0.15,
+                categories: 0.20,
+                topics: 0.10,
+                trending: 0.20,
             },
         },
 
@@ -94,6 +95,15 @@
                 '#chips',
             ],
         },
+
+        // Broad discovery queries — rotated randomly to surface popular content from any era
+        discoveryQueries: [
+            '', 'music video', 'trailer', 'funny', 'review', 'highlights',
+            'how to', 'compilation', 'reaction', 'vlog', 'tutorial', 'news',
+            'challenge', 'prank', 'unboxing', 'animation', 'live', 'top 10',
+            'best of', 'cover', 'remix', 'parody', 'documentary', 'interview',
+            'behind the scenes', 'gameplay', 'montage', 'fail', 'epic',
+        ],
     };
 
     // =========================================================================
@@ -182,6 +192,8 @@
                 topics: this.getTopics(),
                 blockedChannels: this.getBlockedChannels(),
                 customLogo: this.getCustomLogo(),
+                discovery: this.isDiscoveryEnabled(),
+                learning: this.isLearningEnabled(),
                 savedAt: Date.now(),
             };
             this.setProfiles(profiles);
@@ -197,6 +209,8 @@
             if (p.categories) this.setCategories(p.categories);
             if (p.topics) this.setTopics(p.topics);
             if (p.blockedChannels) this.setBlockedChannels(p.blockedChannels);
+            if (p.discovery !== undefined) this.setDiscoveryEnabled(p.discovery);
+            if (p.learning !== undefined) this.setLearningEnabled(p.learning);
             if (p.customLogo) this.setCustomLogo(p.customLogo);
             else this.clearCustomLogo();
             // Reset clock so it doesn't carry over
@@ -227,6 +241,10 @@
             this.setProfiles(profiles);
             return name;
         }
+
+        // --- Trending/Discovery ---
+        static isDiscoveryEnabled()   { return this._get('wbt_discovery', true); }
+        static setDiscoveryEnabled(v) { this._set('wbt_discovery', v); }
 
         // --- Custom logo (data URL) ---
         static getCustomLogo()      { return this._get('wbt_custom_logo', null); }
@@ -302,6 +320,36 @@
             this.setDate(current);
         }
 
+        // --- Learning ---
+        static isLearningEnabled()     { return this._get('wbt_learning', true); }
+        static setLearningEnabled(v)   { this._set('wbt_learning', v); }
+        static getWatchHistory()       { return this._get('wbt_watch_history', []); }
+        static setWatchHistory(h)      { this._set('wbt_watch_history', h); }
+        static addWatchEvent(event) {
+            const history = this.getWatchHistory();
+            if (history.some(e => e.videoId === event.videoId && (event.ts - e.ts) < 300000)) return;
+            history.push(event);
+            const cutoff = Date.now() - (60 * 86400000);
+            const pruned = history.filter(e => e.ts > cutoff);
+            if (pruned.length > 200) pruned.splice(0, pruned.length - 200);
+            this.setWatchHistory(pruned);
+            this._del('wbt_cached_interests');
+        }
+        static getCachedInterests() {
+            const cached = this._get('wbt_cached_interests', null);
+            if (cached) return cached;
+            const interests = InterestModel.compute();
+            this._set('wbt_cached_interests', interests);
+            return interests;
+        }
+        static clearLearningData() {
+            this._del('wbt_watch_history');
+            this._del('wbt_cached_interests');
+            this._del('wbt_load_count');
+        }
+        static getLoadCount()          { return this._get('wbt_load_count', 0); }
+        static incrementLoadCount()    { const c = this.getLoadCount() + 1; this._set('wbt_load_count', c); return c; }
+
         // --- Unified response cache ---
         static getCacheEntry(key) {
             const entry = this._get(`wbt_cache_${key}`, null);
@@ -315,6 +363,65 @@
 
         static setCacheEntry(key, data) {
             this._set(`wbt_cache_${key}`, { ts: Date.now(), data });
+        }
+    }
+
+    // =========================================================================
+    // 2a. INTEREST MODEL  –  compute channel/keyword scores from watch history
+    // =========================================================================
+
+    class InterestModel {
+        static YT_STOP_WORDS = new Set([
+            'official', 'video', 'full', 'new', 'part', 'episode', 'ep',
+            'hd', '4k', 'live', 'stream', 'clip', 'trailer', 'season',
+            'ft', 'feat', 'vs', 'vol', 'remix', 'edit', 'reupload',
+            'deleted', 'original', 'extended', 'version', 'subtitles',
+        ]);
+
+        static compute() {
+            const watches = Store.getWatchHistory();
+            const now = Date.now();
+            const channels = {};
+            const keywords = {};
+
+            for (const w of watches) {
+                const ageDays = (now - w.ts) / 86400000;
+                const decay = Math.pow(0.5, ageDays / 7);
+
+                if (w.channelId) {
+                    if (!channels[w.channelId]) channels[w.channelId] = { name: w.channel, score: 0 };
+                    channels[w.channelId].score += decay;
+                }
+
+                if (w.title) {
+                    const stopWords = new Set(['the','a','an','in','on','at','to','for','of','and','or','is','it','my','we','i','you','this','that','with','from','by','be','as','are','was','were','been','has','have','had','do','does','did','but','not','so','if','no','yes']);
+                    const kws = w.title.replace(/[^\w\s]/g, '').split(/\s+/)
+                        .filter(word => word.length > 2 && !stopWords.has(word.toLowerCase()) && !this.YT_STOP_WORDS.has(word.toLowerCase()));
+                    for (const kw of kws.slice(0, 5)) {
+                        const lower = kw.toLowerCase();
+                        if (!keywords[lower]) keywords[lower] = { score: 0 };
+                        keywords[lower].score += decay;
+                    }
+                }
+            }
+
+            return { channels, keywords };
+        }
+
+        static getLearnedChannels(interests) {
+            return Object.entries(interests.channels)
+                .filter(([_, c]) => c.score >= 2)
+                .sort((a, b) => b[1].score - a[1].score)
+                .slice(0, 10)
+                .map(([id, c]) => ({ channelId: id, name: c.name, score: c.score }));
+        }
+
+        static getLearnedKeywords(interests) {
+            return Object.entries(interests.keywords)
+                .filter(([_, k]) => k.score >= 3)
+                .sort((a, b) => b[1].score - a[1].score)
+                .slice(0, 5)
+                .map(([kw, k]) => ({ keyword: kw, score: k.score }));
         }
     }
 
@@ -970,15 +1077,31 @@
 
         async _fetchSubscriptions(dateWindow, count) {
             const subs = Store.getSubscriptions();
-            if (!subs.length) return [];
+
+            // Inject learned channels
+            let allSubs = [...subs];
+            if (Store.isLearningEnabled()) {
+                const interests = Store.getCachedInterests();
+                if (interests) {
+                    const learned = InterestModel.getLearnedChannels(interests);
+                    const explicitIds = new Set(subs.map(s => s.id).filter(Boolean));
+                    for (const lc of learned) {
+                        if (!explicitIds.has(lc.channelId)) {
+                            allSubs.push({ id: lc.channelId, name: lc.name, weight: Math.min(3, Math.round(lc.score)), _learned: true });
+                        }
+                    }
+                }
+            }
+
+            if (!allSubs.length) return [];
 
             const cacheKey = `subs_${dateWindow.center.toDateString()}`;
             const cached = Store.getCacheEntry(cacheKey);
             if (cached) return cached;
 
-            const totalWeight = subs.reduce((sum, s) => sum + (s.weight || 3), 0);
+            const totalWeight = allSubs.reduce((sum, s) => sum + (s.weight || 3), 0);
             const batches = await Promise.allSettled(
-                subs.map(sub => {
+                allSubs.map(sub => {
                     const w = sub.weight || 3;
                     const perChannel = Math.max(3, Math.ceil(count * w / totalWeight));
                     return this.api.getChannelVideos(sub.name, {
@@ -1002,15 +1125,31 @@
         async _fetchSearchTerms(dateWindow, count) {
             const raw = Store.getSearchTerms();
             const terms = raw.map(t => typeof t === 'string' ? { term: t, weight: 3 } : t);
-            if (!terms.length) return [];
+
+            // Inject learned keywords
+            let allTerms = [...terms];
+            if (Store.isLearningEnabled()) {
+                const interests = Store.getCachedInterests();
+                if (interests) {
+                    const learned = InterestModel.getLearnedKeywords(interests);
+                    const existingTerms = new Set(terms.map(t => t.term.toLowerCase()));
+                    for (const lk of learned) {
+                        if (!existingTerms.has(lk.keyword)) {
+                            allTerms.push({ term: lk.keyword, weight: 2, _learned: true });
+                        }
+                    }
+                }
+            }
+
+            if (!allTerms.length) return [];
 
             const cacheKey = `search_${dateWindow.center.toDateString()}`;
             const cached = Store.getCacheEntry(cacheKey);
             if (cached) return cached;
 
-            const totalWeight = terms.reduce((sum, t) => sum + (t.weight || 3), 0);
+            const totalWeight = allTerms.reduce((sum, t) => sum + (t.weight || 3), 0);
             const batches = await Promise.allSettled(
-                terms.map(t => {
+                allTerms.map(t => {
                     const w = t.weight || 3;
                     const perTerm = Math.max(3, Math.ceil(count * w / totalWeight));
                     return this.api.searchVideos(t.term, {
@@ -1089,11 +1228,68 @@
             return videos;
         }
 
+        async _fetchTrending(dateWindow, count) {
+            if (!Store.isDiscoveryEnabled()) return [];
+
+            const cacheKey = `trending_${dateWindow.center.toDateString()}`;
+            const cached = Store.getCacheEntry(cacheKey);
+            if (cached) return cached;
+
+            const videos = await this._fetchTrendingInner(dateWindow, count);
+            if (videos.length) Store.setCacheEntry(cacheKey, videos);
+            return videos;
+        }
+
+        async _fetchTrendingInner(dateWindow, count) {
+            // Pick 4 random queries from the pool
+            const pool = [...CONFIG.discoveryQueries];
+            const picked = [];
+            for (let i = 0; i < 4 && pool.length; i++) {
+                const idx = Math.floor(Math.random() * pool.length);
+                picked.push(pool.splice(idx, 1)[0]);
+            }
+
+            const perQuery = Math.max(5, Math.ceil(count / picked.length));
+            const batches = await Promise.allSettled(
+                picked.map(q =>
+                    this.api.searchVideos(q, {
+                        publishedAfter: dateWindow.after,
+                        publishedBefore: dateWindow.before,
+                        maxResults: perQuery,
+                        order: 'viewCount',
+                    })
+                )
+            );
+
+            return batches
+                .filter(r => r.status === 'fulfilled')
+                .flatMap(r => r.value);
+        }
+
+        // --- Effective weights (adjusted by learning) ---
+
+        _getEffectiveWeights() {
+            if (!Store.isLearningEnabled()) return CONFIG.feed.weights;
+            const interests = Store.getCachedInterests();
+            if (!interests) return CONFIG.feed.weights;
+
+            const learnedCh = InterestModel.getLearnedChannels(interests).length;
+            const learnedKw = InterestModel.getLearnedKeywords(interests).length;
+
+            const w = { ...CONFIG.feed.weights };
+            const subBoost = Math.min(0.10, learnedCh * 0.02);
+            const termBoost = Math.min(0.05, learnedKw * 0.01);
+            w.subscriptions += subBoost;
+            w.searchTerms += termBoost;
+            w.trending = Math.max(0.05, w.trending - subBoost - termBoost);
+            return w;
+        }
+
         // --- Mix sources with configured weights ---
 
-        _mixSources(sources) {
-            // sources: { subscriptions, searchTerms, categories, topics }
-            const w = CONFIG.feed.weights;
+        _mixSources(sources, weights) {
+            // sources: { subscriptions, searchTerms, categories, topics, trending }
+            const w = weights || CONFIG.feed.weights;
             const total = CONFIG.feed.maxHomepageVideos;
             const mixed = [];
 
@@ -1108,6 +1304,7 @@
                 searchTerms:   Math.round(total * w.searchTerms),
                 categories:    Math.round(total * w.categories),
                 topics:        Math.round(total * w.topics),
+                trending:      Math.round(total * w.trending),
             };
 
             // Take from each, then redistribute unfilled slots
@@ -1143,22 +1340,29 @@
             const dateWindow = this._dateWindow(selectedDate);
             const total = CONFIG.feed.maxHomepageVideos;
 
-            // Fetch all 4 sources in parallel (per-source caches still speed this up)
+            // Learning: compute effective weights (every 10th load = exploration burst)
+            const loadNum = Store.incrementLoadCount();
+            const isExploration = loadNum % 10 === 0;
+            const weights = isExploration ? CONFIG.feed.weights : this._getEffectiveWeights();
+
+            // Fetch all 5 sources in parallel (per-source caches still speed this up)
             // Use allSettled so one failing source doesn't kill the whole feed
             const results = await Promise.allSettled([
-                this._fetchSubscriptions(dateWindow, Math.round(total * CONFIG.feed.weights.subscriptions * 2)),
-                this._fetchSearchTerms(dateWindow, Math.round(total * CONFIG.feed.weights.searchTerms * 2)),
-                this._fetchCategories(dateWindow, Math.round(total * CONFIG.feed.weights.categories * 2)),
-                this._fetchTopics(dateWindow, Math.round(total * CONFIG.feed.weights.topics * 2)),
+                this._fetchSubscriptions(dateWindow, Math.round(total * weights.subscriptions * 2)),
+                this._fetchSearchTerms(dateWindow, Math.round(total * weights.searchTerms * 2)),
+                this._fetchCategories(dateWindow, Math.round(total * weights.categories * 2)),
+                this._fetchTopics(dateWindow, Math.round(total * weights.topics * 2)),
+                this._fetchTrending(dateWindow, Math.round(total * weights.trending * 2)),
             ]);
 
             const subscriptions = results[0].status === 'fulfilled' ? results[0].value : [];
             const searchTerms  = results[1].status === 'fulfilled' ? results[1].value : [];
             const categories   = results[2].status === 'fulfilled' ? results[2].value : [];
             const topics       = results[3].status === 'fulfilled' ? results[3].value : [];
+            const trending     = results[4].status === 'fulfilled' ? results[4].value : [];
 
             // Log which sources failed so we can debug
-            const names = ['subscriptions', 'searchTerms', 'categories', 'topics'];
+            const names = ['subscriptions', 'searchTerms', 'categories', 'topics', 'trending'];
             results.forEach((r, i) => {
                 if (r.status === 'rejected') {
                     console.warn(`[iw2gb] ${names[i]} fetch failed:`, r.reason?.message || r.reason);
@@ -1166,7 +1370,7 @@
             });
 
             // Mix and deduplicate
-            const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics });
+            const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics, trending }, weights);
             const deduped = this._dedupe(mixed);
 
             // Deprioritize recently seen videos so refreshes show new content
@@ -1195,14 +1399,16 @@
                 this._fetchSearchTermsUncached(dateWindow, Math.round(total * CONFIG.feed.weights.searchTerms * 2)),
                 this._fetchCategoriesUncached(dateWindow, Math.round(total * CONFIG.feed.weights.categories * 2)),
                 this._fetchTopicsUncached(dateWindow, Math.round(total * CONFIG.feed.weights.topics * 2)),
+                this._fetchTrendingUncached(dateWindow, Math.round(total * CONFIG.feed.weights.trending * 2)),
             ]);
 
             const subscriptions = results[0].status === 'fulfilled' ? results[0].value : [];
             const searchTerms  = results[1].status === 'fulfilled' ? results[1].value : [];
             const categories   = results[2].status === 'fulfilled' ? results[2].value : [];
             const topics       = results[3].status === 'fulfilled' ? results[3].value : [];
+            const trending     = results[4].status === 'fulfilled' ? results[4].value : [];
 
-            const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics });
+            const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics, trending });
             const deduped = this._dedupe(mixed);
 
             // Filter out already-displayed videos
@@ -1214,10 +1420,23 @@
         // Uncached fetch variants for infinite scroll
         async _fetchSubscriptionsUncached(dateWindow, count) {
             const subs = Store.getSubscriptions();
-            if (!subs.length) return [];
-            const totalWeight = subs.reduce((sum, s) => sum + (s.weight || 3), 0);
+            let allSubs = [...subs];
+            if (Store.isLearningEnabled()) {
+                const interests = Store.getCachedInterests();
+                if (interests) {
+                    const learned = InterestModel.getLearnedChannels(interests);
+                    const explicitIds = new Set(subs.map(s => s.id).filter(Boolean));
+                    for (const lc of learned) {
+                        if (!explicitIds.has(lc.channelId)) {
+                            allSubs.push({ id: lc.channelId, name: lc.name, weight: Math.min(3, Math.round(lc.score)), _learned: true });
+                        }
+                    }
+                }
+            }
+            if (!allSubs.length) return [];
+            const totalWeight = allSubs.reduce((sum, s) => sum + (s.weight || 3), 0);
             const batches = await Promise.allSettled(
-                subs.map(sub => {
+                allSubs.map(sub => {
                     const w = sub.weight || 3;
                     const perChannel = Math.max(3, Math.ceil(count * w / totalWeight));
                     return this.api.getChannelVideos(sub.name, {
@@ -1235,10 +1454,23 @@
         async _fetchSearchTermsUncached(dateWindow, count) {
             const raw = Store.getSearchTerms();
             const terms = raw.map(t => typeof t === 'string' ? { term: t, weight: 3 } : t);
-            if (!terms.length) return [];
-            const totalWeight = terms.reduce((sum, t) => sum + (t.weight || 3), 0);
+            let allTerms = [...terms];
+            if (Store.isLearningEnabled()) {
+                const interests = Store.getCachedInterests();
+                if (interests) {
+                    const learned = InterestModel.getLearnedKeywords(interests);
+                    const existingTerms = new Set(terms.map(t => t.term.toLowerCase()));
+                    for (const lk of learned) {
+                        if (!existingTerms.has(lk.keyword)) {
+                            allTerms.push({ term: lk.keyword, weight: 2, _learned: true });
+                        }
+                    }
+                }
+            }
+            if (!allTerms.length) return [];
+            const totalWeight = allTerms.reduce((sum, t) => sum + (t.weight || 3), 0);
             const batches = await Promise.allSettled(
-                terms.map(t => {
+                allTerms.map(t => {
                     const w = t.weight || 3;
                     const perTerm = Math.max(3, Math.ceil(count * w / totalWeight));
                     return this.api.searchVideos(t.term, {
@@ -1286,6 +1518,11 @@
                 })
             );
             return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+        }
+
+        async _fetchTrendingUncached(dateWindow, count) {
+            if (!Store.isDiscoveryEnabled()) return [];
+            return this._fetchTrendingInner(dateWindow, count);
         }
 
         async buildRecommendations(currentVideoId, selectedDate) {
@@ -1605,6 +1842,8 @@
             this._nukeInterval = null;
             this._observer = null;
             this._pendingSearchClean = null;
+            this._videoMetaMap = new Map();
+            this._pendingWatch = null;
         }
 
         init() {
@@ -1644,6 +1883,7 @@
             this._endscreenReplaced = false;
             this._endscreenLoading = false;
             this._pendingSearchClean = null;
+            this._pendingWatch = null;
 
             if (!Store.isActive()) return;
 
@@ -1662,6 +1902,15 @@
                 this._tryReplaceHomepage();
             } else if (this._isVideoPage()) {
                 this._tryReplaceSidebar();
+                // Start watch tracking
+                if (Store.isLearningEnabled()) {
+                    const videoId = new URLSearchParams(location.search).get('v');
+                    if (videoId && this._videoMetaMap.has(videoId)) {
+                        this._pendingWatch = { videoId, meta: this._videoMetaMap.get(videoId), startedAt: Date.now() };
+                    } else {
+                        this._pendingWatch = null;
+                    }
+                }
             } else if (this._isChannelPage()) {
                 this._tryReplaceChannelPage();
             }
@@ -1722,6 +1971,20 @@
                     if (!this._sidebarReplaced && !this._sidebarLoading) this._tryReplaceSidebar();
                     this._filterComments();
                     this._hidePlayerOverlays();
+
+                    // Commit watch after 30 seconds on video page
+                    if (this._pendingWatch && Date.now() - this._pendingWatch.startedAt >= 30000) {
+                        const pw = this._pendingWatch;
+                        Store.addWatchEvent({
+                            videoId: pw.videoId,
+                            channel: pw.meta.channel,
+                            channelId: pw.meta.channelId,
+                            title: pw.meta.title,
+                            ts: Date.now(),
+                        });
+                        console.log('[iw2gb] Learned watch:', pw.meta.channel, '-', pw.meta.title);
+                        this._pendingWatch = null;
+                    }
 
                     // Endscreen: show WBT grid when video ends
                     const video = document.querySelector('video.html5-main-video');
@@ -1889,6 +2152,11 @@
                     videoGrid.appendChild(VideoRenderer.homepageCard(video));
                 }
 
+                // Register video metadata for watch tracking
+                for (const v of this.allVideos) {
+                    this._videoMetaMap.set(v.id, { channel: v.channel, channelId: v.channelId, title: v.title });
+                }
+
                 // "Loading more..." indicator for infinite scroll
                 const loadingMore = document.createElement('div');
                 loadingMore.className = 'wbt-loading-more';
@@ -1933,6 +2201,7 @@
                             for (const video of retry) {
                                 videoGrid.appendChild(VideoRenderer.homepageCard(video));
                                 self.allVideos.push(video);
+                                self._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                             }
                             self._enrichCardDates(retry);
                             Store.addSeenIds(retry.map(v => v.id));
@@ -1940,6 +2209,7 @@
                             for (const video of fresh) {
                                 videoGrid.appendChild(VideoRenderer.homepageCard(video));
                                 self.allVideos.push(video);
+                                self._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                             }
                             self._enrichCardDates(fresh);
                             Store.addSeenIds(fresh.map(v => v.id));
@@ -2101,6 +2371,7 @@
                 // Show all recommendations — ~30 sidebar cards is fine for perf
                 for (const video of recommendations) {
                     container.appendChild(VideoRenderer.sidebarCard(video));
+                    this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                 }
 
                 this._sidebarReplaced = true;
@@ -2179,6 +2450,7 @@
                 const endscreenVideos = recommendations.slice(0, 12);
                 for (const video of endscreenVideos) {
                     grid.appendChild(VideoRenderer.endscreenCard(video));
+                    this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                 }
 
                 overlay.appendChild(grid);
@@ -3874,6 +4146,57 @@
             topicList.id = 'wbt-topic-list';
             body.appendChild(this._buildSection('Custom Topics', 'topics', false, [topicRow, topicList]));
 
+            // --- Trending/Discovery section ---
+            const trendingContainer = _el('div', null);
+            const trendingRow = _el('div', 'wbt-add-row');
+            trendingRow.style.cssText = 'justify-content:space-between;align-items:center;';
+            const trendingLabel = _el('span', null, 'Mix in popular videos from the era');
+            trendingLabel.style.cssText = 'color:#ccc;font-size:11px;';
+            const trendingToggle = _el('button', 'wbt-preset-btn');
+            trendingToggle.id = 'wbt-trending-toggle';
+            trendingToggle.textContent = Store.isDiscoveryEnabled() ? 'ON' : 'OFF';
+            trendingToggle.style.cssText = Store.isDiscoveryEnabled()
+                ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
+                : 'background:#5a2a2a;color:#f44;min-width:40px;';
+            trendingRow.appendChild(trendingLabel);
+            trendingRow.appendChild(trendingToggle);
+            const trendingDesc = _el('div', null, 'Searches broad queries sorted by view count within your date window to surface what was popular/viral at the time.');
+            trendingDesc.style.cssText = 'color:#666;font-size:10px;margin-top:4px;line-height:1.3;';
+            trendingContainer.appendChild(trendingRow);
+            trendingContainer.appendChild(trendingDesc);
+            body.appendChild(this._buildSection('Trending', 'trending', false, [trendingContainer]));
+
+            // --- Learning section ---
+            const learnContainer = _el('div', null);
+            const learnRow = _el('div', 'wbt-add-row');
+            learnRow.style.cssText = 'justify-content:space-between;align-items:center;';
+            const learnLabel = _el('span', null, 'Learn from what I watch');
+            learnLabel.style.cssText = 'color:#ccc;font-size:11px;';
+            const learnToggle = _el('button', 'wbt-preset-btn');
+            learnToggle.id = 'wbt-learn-toggle';
+            learnToggle.textContent = Store.isLearningEnabled() ? 'ON' : 'OFF';
+            learnToggle.style.cssText = Store.isLearningEnabled()
+                ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
+                : 'background:#5a2a2a;color:#f44;min-width:40px;';
+            learnRow.appendChild(learnLabel);
+            learnRow.appendChild(learnToggle);
+
+            const learnStats = _el('div', null);
+            learnStats.id = 'wbt-learn-stats';
+
+            const learnReset = _el('button', 'wbt-preset-btn', 'Reset Learning Data');
+            learnReset.id = 'wbt-learn-reset';
+            learnReset.style.cssText = 'margin-top:6px;background:#5a2a2a;color:#f44;width:100%;';
+
+            const learnDesc = _el('div', null, 'Tracks what you watch (30s+) and boosts similar channels/topics. Every 10th load uses original weights for discovery.');
+            learnDesc.style.cssText = 'color:#666;font-size:10px;margin-top:4px;line-height:1.3;';
+
+            learnContainer.appendChild(learnRow);
+            learnContainer.appendChild(learnStats);
+            learnContainer.appendChild(learnReset);
+            learnContainer.appendChild(learnDesc);
+            body.appendChild(this._buildSection('Learning', 'learning', false, [learnContainer]));
+
             // --- Blocked Channels section ---
             const blockInput = document.createElement('input');
             blockInput.className = 'wbt-add-input';
@@ -4015,6 +4338,7 @@
                         if (id === 'cats') this._refreshCatsGrid();
                         if (id === 'topics') this._refreshTopicsList();
                         if (id === 'block') this._refreshBlockList();
+                        if (id === 'learning') this._refreshLearningSection();
                         if (id === 'profiles') this._refreshProfileList();
                         if (id === 'stats') this._refreshStats();
                     }
@@ -4070,6 +4394,37 @@
                     this._toast('Clock started — advancing in real time', 'success');
                     this.dom.forceReload();
                 }
+            });
+
+            // Trending toggle
+            this.panel.querySelector('#wbt-trending-toggle').addEventListener('click', () => {
+                const nowEnabled = !Store.isDiscoveryEnabled();
+                Store.setDiscoveryEnabled(nowEnabled);
+                const btn = this.panel.querySelector('#wbt-trending-toggle');
+                btn.textContent = nowEnabled ? 'ON' : 'OFF';
+                btn.style.cssText = nowEnabled
+                    ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
+                    : 'background:#5a2a2a;color:#f44;min-width:40px;';
+                this._toast(nowEnabled ? 'Trending enabled' : 'Trending disabled', 'success');
+            });
+
+            // Learning toggle
+            this.panel.querySelector('#wbt-learn-toggle').addEventListener('click', () => {
+                const nowEnabled = !Store.isLearningEnabled();
+                Store.setLearningEnabled(nowEnabled);
+                const btn = this.panel.querySelector('#wbt-learn-toggle');
+                btn.textContent = nowEnabled ? 'ON' : 'OFF';
+                btn.style.cssText = nowEnabled
+                    ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
+                    : 'background:#5a2a2a;color:#f44;min-width:40px;';
+                this._toast(nowEnabled ? 'Learning enabled' : 'Learning disabled', 'success');
+            });
+
+            // Learning reset
+            this.panel.querySelector('#wbt-learn-reset').addEventListener('click', () => {
+                Store.clearLearningData();
+                this._refreshLearningSection();
+                this._toast('Learning data cleared', 'success');
             });
 
             // Add subscription
@@ -4594,6 +4949,52 @@
                 item.appendChild(label);
                 item.appendChild(btns);
                 list.appendChild(item);
+            }
+        }
+
+        // --- Learning stats ---
+
+        _refreshLearningSection() {
+            const container = this.panel.querySelector('#wbt-learn-stats');
+            if (!container) return;
+            _clear(container);
+
+            const history = Store.getWatchHistory();
+            const interests = history.length ? Store.getCachedInterests() : null;
+            const channels = interests ? InterestModel.getLearnedChannels(interests) : [];
+            const keywords = interests ? InterestModel.getLearnedKeywords(interests) : [];
+
+            container.style.cssText = 'margin-top:6px;font-size:11px;color:#aaa;line-height:1.5;';
+
+            const watchLine = _el('div', null, `${history.length} watches tracked`);
+            container.appendChild(watchLine);
+
+            if (channels.length) {
+                const chTitle = _el('div', null, 'Learned channels:');
+                chTitle.style.cssText = 'color:#ccc;margin-top:4px;';
+                container.appendChild(chTitle);
+                for (const ch of channels.slice(0, 5)) {
+                    const line = _el('div', null, `  ${ch.name} (${ch.score.toFixed(1)})`);
+                    line.style.cssText = 'color:#888;padding-left:8px;';
+                    container.appendChild(line);
+                }
+            }
+
+            if (keywords.length) {
+                const kwTitle = _el('div', null, 'Learned keywords:');
+                kwTitle.style.cssText = 'color:#ccc;margin-top:4px;';
+                container.appendChild(kwTitle);
+                for (const kw of keywords.slice(0, 5)) {
+                    const line = _el('div', null, `  "${kw.keyword}" (${kw.score.toFixed(1)})`);
+                    line.style.cssText = 'color:#888;padding-left:8px;';
+                    container.appendChild(line);
+                }
+            }
+
+            if (!channels.length && !keywords.length && history.length) {
+                const hint = _el('div', null, 'Watch more videos to build up interests');
+                hint.style.cssText = 'color:#666;font-style:italic;';
+                container.appendChild(hint);
             }
         }
 
