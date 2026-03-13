@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      128
+// @version      129
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -1818,7 +1818,7 @@
 
                     try {
                         const dateStr = Store.getCurrentDate();
-                        if (!dateStr) return;
+                        if (!dateStr) { self._infiniteScrollFetching = false; return; }
 
                         self._infiniteScrollPage++;
                         const existingIds = new Set(self.allVideos.map(v => v.id));
@@ -1859,22 +1859,35 @@
                     }
                 };
 
-                // Detect when user scrolls near bottom — use the ACTUAL scrolling element
-                const getScrollInfo = () => {
-                    // Try YouTube's known scroll containers
-                    const ytApp = document.querySelector('ytd-app');
-                    if (ytApp && ytApp.scrollHeight > ytApp.clientHeight) {
-                        return { el: ytApp, top: ytApp.scrollTop, height: ytApp.scrollHeight, client: ytApp.clientHeight };
+                // Detect when user scrolls near bottom
+                const isNearBottom = () => {
+                    // Check ALL possible scroll containers
+                    const candidates = [
+                        document.scrollingElement,
+                        document.documentElement,
+                        document.body,
+                        document.querySelector('ytd-app'),
+                        document.querySelector('#page-manager'),
+                        document.querySelector('ytd-browse'),
+                    ];
+                    for (const el of candidates) {
+                        if (!el) continue;
+                        if (el.scrollHeight <= el.clientHeight) continue;
+                        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1500) {
+                            return true;
+                        }
                     }
-                    const se = document.scrollingElement || document.documentElement;
-                    return { el: se, top: se.scrollTop, height: se.scrollHeight, client: se.clientHeight };
+                    // Also check if the grid bottom is visible in viewport
+                    const rect = videoGrid.getBoundingClientRect();
+                    if (rect.bottom < window.innerHeight + 1500) {
+                        return true;
+                    }
+                    return false;
                 };
 
                 const checkScroll = () => {
                     if (!self._infiniteScrollActive || self._infiniteScrollFetching) return;
-                    const info = getScrollInfo();
-                    // Trigger when within 1000px of the bottom
-                    if (info.top + info.client >= info.height - 1000) {
+                    if (isNearBottom()) {
                         fetchAndAppend();
                     }
                 };
@@ -1882,12 +1895,13 @@
                 // Listen for scroll on multiple targets
                 document.addEventListener('scroll', checkScroll, true);
                 document.addEventListener('wheel', checkScroll, { passive: true });
-                // Polling fallback
+                window.addEventListener('scroll', checkScroll, { passive: true });
+                // Polling fallback — more frequent
                 const scrollPoll = setInterval(() => {
                     if (!document.body.contains(videoGrid)) { clearInterval(scrollPoll); return; }
                     if (!self._infiniteScrollActive) { clearInterval(scrollPoll); return; }
                     checkScroll();
-                }, 2000);
+                }, 1000);
 
                 this._homepageReplaced = true;
                 this._homepageLoading = false;
