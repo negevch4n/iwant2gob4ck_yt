@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      125
+// @version      126
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -4336,7 +4336,7 @@
 
     class App {
         static async init() {
-            console.log('[iw2gb] Initializing v125...');
+            console.log('[iw2gb] Initializing v126...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -4396,7 +4396,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[iw2gb] v125 Ready. Date:', Store.getCurrentDate(),
+            console.log('[iw2gb] v126 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
