@@ -1277,11 +1277,16 @@
             const learnedKw = InterestModel.getLearnedKeywords(interests).length;
 
             const w = { ...CONFIG.feed.weights };
-            const subBoost = Math.min(0.10, learnedCh * 0.02);
-            const termBoost = Math.min(0.05, learnedKw * 0.01);
+            const subBoost = Math.min(0.20, learnedCh * 0.04);
+            const termBoost = Math.min(0.10, learnedKw * 0.02);
             w.subscriptions += subBoost;
             w.searchTerms += termBoost;
-            w.trending = Math.max(0.05, w.trending - subBoost - termBoost);
+            // Pull from trending and categories to compensate
+            const totalBoost = subBoost + termBoost;
+            const trendingCut = Math.min(w.trending - 0.05, totalBoost * 0.6);
+            const catsCut = Math.min(w.categories - 0.05, totalBoost - trendingCut);
+            w.trending -= trendingCut;
+            w.categories -= catsCut;
             return w;
         }
 
@@ -1972,8 +1977,15 @@
                     this._filterComments();
                     this._hidePlayerOverlays();
 
-                    // Commit watch after 30 seconds on video page
-                    if (this._pendingWatch && Date.now() - this._pendingWatch.startedAt >= 30000) {
+                    // Commit watch after sufficient time on video page
+                    // Threshold scales with video duration: 50% of length, clamped 5s–30s
+                    if (this._pendingWatch) {
+                        const videoEl = document.querySelector('video.html5-main-video');
+                        const dur = videoEl && videoEl.duration && isFinite(videoEl.duration) ? videoEl.duration : 0;
+                        const threshold = dur > 0 ? Math.max(5000, Math.min(30000, dur * 500)) : 30000;
+                        this._pendingWatch._threshold = threshold;
+                    }
+                    if (this._pendingWatch && Date.now() - this._pendingWatch.startedAt >= (this._pendingWatch._threshold || 30000)) {
                         const pw = this._pendingWatch;
                         Store.addWatchEvent({
                             videoId: pw.videoId,
