@@ -1277,16 +1277,11 @@
             const learnedKw = InterestModel.getLearnedKeywords(interests).length;
 
             const w = { ...CONFIG.feed.weights };
-            const subBoost = Math.min(0.20, learnedCh * 0.04);
-            const termBoost = Math.min(0.10, learnedKw * 0.02);
+            const subBoost = Math.min(0.10, learnedCh * 0.02);
+            const termBoost = Math.min(0.05, learnedKw * 0.01);
             w.subscriptions += subBoost;
             w.searchTerms += termBoost;
-            // Pull from trending and categories to compensate
-            const totalBoost = subBoost + termBoost;
-            const trendingCut = Math.min(w.trending - 0.05, totalBoost * 0.6);
-            const catsCut = Math.min(w.categories - 0.05, totalBoost - trendingCut);
-            w.trending -= trendingCut;
-            w.categories -= catsCut;
+            w.trending = Math.max(0.05, w.trending - subBoost - termBoost);
             return w;
         }
 
