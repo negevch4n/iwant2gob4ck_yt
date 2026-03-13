@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      129
+// @version      130
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -1648,6 +1648,7 @@
                     }
                     if (!this._sidebarReplaced && !this._sidebarLoading) this._tryReplaceSidebar();
                     this._filterComments();
+                    this._hidePlayerOverlays();
 
                     // Endscreen: show WBT grid when video ends
                     const video = document.querySelector('video.html5-main-video');
@@ -1699,6 +1700,25 @@
                 if (link || text.trim() === 'Shorts') {
                     el.style.display = 'none';
                     el.dataset.wbtHidden = '1';
+                }
+            }
+        }
+
+        _hidePlayerOverlays() {
+            const selectors = [
+                '.ytp-suggestion-set',
+                '.ytp-videowall-still',
+                '.ytp-autonav-endscreen',
+                '.ytp-upnext',
+                '.ytp-pause-overlay',
+                '.ytp-ce-element',
+            ];
+            for (const sel of selectors) {
+                for (const el of document.querySelectorAll(sel)) {
+                    if (!el.dataset.wbtHidden) {
+                        el.style.display = 'none';
+                        el.dataset.wbtHidden = '1';
+                    }
                 }
             }
         }
@@ -2039,7 +2059,7 @@
             this._endscreenLoading = true;
 
             // Hide YouTube's native endscreen elements
-            for (const sel of ['.ytp-endscreen-content', '.html5-endscreen', '.ytp-ce-element']) {
+            for (const sel of ['.ytp-endscreen-content', '.html5-endscreen', '.ytp-ce-element', '.ytp-suggestion-set', '.ytp-videowall-still', '.ytp-autonav-endscreen', '.ytp-upnext', '.ytp-pause-overlay']) {
                 for (const el of player.querySelectorAll(sel)) {
                     el.style.display = 'none';
                 }
@@ -3451,10 +3471,20 @@
 
                 /* === WBT Endscreen Overlay === */
 
-                /* Hide YouTube's native endscreen */
+                /* Hide YouTube's native endscreen & watch-next overlays */
                 .html5-endscreen,
                 .ytp-endscreen-content,
-                .ytp-ce-element {
+                .ytp-ce-element,
+                .ytp-suggestion-set,
+                .ytp-videowall-still,
+                .ytp-endscreen-content .ytp-videowall-still,
+                .ytp-autonav-endscreen,
+                .ytp-autonav-endscreen-countdown,
+                .ytp-autonav-endscreen-upnext-container,
+                .ytp-player-content:has(.ytp-autonav-endscreen),
+                .ytp-upnext,
+                .ytp-pause-overlay,
+                .ytp-scroll-min .ytp-pause-overlay {
                     display: none !important;
                 }
 
