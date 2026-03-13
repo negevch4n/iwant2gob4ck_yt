@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      130
+// @version      131
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -692,6 +692,52 @@
             return results;
         }
 
+        _parsePlaylistResults(data) {
+            const results = [];
+            try {
+                // Navigate the browse response for playlist/uploads
+                const tabs = data?.contents?.twoColumnBrowseResultsRenderer?.tabs
+                    || data?.contents?.singleColumnBrowseResultsRenderer?.tabs || [];
+                let items = [];
+                for (const tab of tabs) {
+                    const contents = tab?.tabRenderer?.content?.sectionListRenderer?.contents
+                        || tab?.tabRenderer?.content?.richGridRenderer?.contents || [];
+                    for (const section of contents) {
+                        const sectionItems = section?.itemSectionRenderer?.contents?.[0]
+                            ?.playlistVideoListRenderer?.contents || [];
+                        items.push(...sectionItems);
+                    }
+                }
+                // Also try the direct playlist path
+                if (!items.length) {
+                    items = data?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]
+                        ?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
+                        ?.itemSectionRenderer?.contents?.[0]
+                        ?.playlistVideoListRenderer?.contents || [];
+                }
+                for (const item of items) {
+                    const v = item.playlistVideoRenderer;
+                    if (!v || !v.videoId) continue;
+                    const viewText = v.videoInfo?.runs?.[0]?.text || '';
+                    const relDate = v.videoInfo?.runs?.[2]?.text || '';
+                    results.push({
+                        id: v.videoId,
+                        title: v.title?.runs?.[0]?.text || v.title?.simpleText || '',
+                        channel: v.shortBylineText?.runs?.[0]?.text || '',
+                        channelId: v.shortBylineText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId || '',
+                        thumbnail: v.thumbnail?.thumbnails?.slice(-1)?.[0]?.url || '',
+                        publishedAt: '',
+                        viewCount: this._parseViewCount(viewText),
+                        viewCountFormatted: viewText || '0 views',
+                        relativeDate: relDate,
+                    });
+                }
+            } catch (e) {
+                console.warn('[iw2gb] Playlist parse error:', e.message);
+            }
+            return results;
+        }
+
         _parseChannelResults(data) {
             try {
                 const sections = data?.contents?.twoColumnSearchResultsRenderer
@@ -764,8 +810,31 @@
             return results.slice(0, maxResults || CONFIG.api.maxResults);
         }
 
-        async getChannelVideos(channelName, { publishedAfter, publishedBefore, maxResults, order = 'date' } = {}) {
-            const q = this._buildDateQuery(`"${channelName}"`, publishedAfter, publishedBefore);
+        async getChannelVideos(channelName, { publishedAfter, publishedBefore, maxResults, order = 'date', channelId } = {}) {
+            // If we have a channel ID, use the browse endpoint to get actual uploads
+            if (channelId && channelId.startsWith('UC')) {
+                try {
+                    const uploadsPlaylistId = 'UU' + channelId.slice(2);
+                    const data = await this._post('browse', { browseId: `VL${uploadsPlaylistId}` });
+                    const results = this._parsePlaylistResults(data);
+                    // Filter by date client-side
+                    const filtered = results.filter(v => {
+                        const approx = DateHelper.approxPublishDate(v.relativeDate);
+                        if (!approx) return true; // keep if we can't determine date
+                        if (publishedAfter && approx < new Date(publishedAfter)) return false;
+                        if (publishedBefore && approx > new Date(publishedBefore)) return false;
+                        return true;
+                    });
+                    if (filtered.length > 0) {
+                        return filtered.slice(0, maxResults || CONFIG.api.maxResults);
+                    }
+                    // Fall through to search if browse returned nothing in range
+                } catch (e) {
+                    console.warn('[iw2gb] Browse fallback for', channelName, e.message);
+                }
+            }
+            // Fallback: search for channel name (unquoted for broader match)
+            const q = this._buildDateQuery(channelName, publishedAfter, publishedBefore);
             const body = { query: q, params: 'EgIQAQ==' }; // videos only
             const data = await this._post('search', body);
             const results = this._parseSearchResults(data);
@@ -917,6 +986,7 @@
                         publishedBefore: dateWindow.before,
                         maxResults: perChannel,
                         order: 'date',
+                        channelId: sub.id,
                     });
                 })
             );
@@ -1155,6 +1225,7 @@
                         publishedBefore: dateWindow.before,
                         maxResults: perChannel,
                         order: 'date',
+                        channelId: sub.id,
                     });
                 })
             );
@@ -1243,6 +1314,7 @@
                             publishedBefore: dateWindow.before,
                             maxResults: 10,
                             order: 'date',
+                            channelId: current.channelId,
                         }) : Promise.resolve([]),
                         keywords.length ? this._searchKeywords(keywords, dateWindow, 10, current.channelId) : Promise.resolve([]),
                     ]);
@@ -1308,6 +1380,7 @@
                         publishedAfter: dateWindow.after,
                         publishedBefore: dateWindow.before,
                         maxResults: 5,
+                        channelId: sub.id,
                     }));
                 }
             }
@@ -2257,10 +2330,15 @@
             grid.insertBefore(container, grid.firstChild);
 
             try {
+                // Try to get channel ID from page metadata
+                const channelIdMeta = document.querySelector('meta[itemprop="channelId"]')?.content
+                    || document.querySelector('link[rel="canonical"]')?.href?.match(/channel\/(UC[^/]+)/)?.[1]
+                    || '';
                 const videos = await this.feedEngine.api.getChannelVideos(channelName, {
                     publishedBefore: dateStr,
                     maxResults: 50,
                     order: 'date',
+                    channelId: channelIdMeta,
                 });
 
                 if (!document.body.contains(container)) {
