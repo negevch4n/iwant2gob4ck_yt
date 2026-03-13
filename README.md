@@ -1,4 +1,4 @@
-# WayBackTube
+# iwant2gob4ck - YouTube Time Machine
 
 Tampermonkey userscript that filters YouTube to a specific date. You pick a date, and the entire site only shows content from that time period. Homepage, search, channels, comments, everything.
 
@@ -12,9 +12,9 @@ Tampermonkey userscript that filters YouTube to a specific date. You pick a date
 
 **Homepage feed.** Pulls videos from around your selected date using YouTube's InnerTube API. Videos come from 4 configurable sources: subscriptions, search terms, categories, and custom topics. Each source has adjustable weight so you can control how much of the feed it takes up. Infinite scroll fetches more videos as you go, shifting the date window backward to keep finding new content.
 
-**Sidebar recommendations.** On video pages, the sidebar gets replaced with WayBackTube recommendations pulled from the same sources, filtered to the same date range. Related videos from the current video's channel and keywords are mixed in.
+**Sidebar recommendations.** On video pages, the sidebar gets replaced with iwant2gob4ck recommendations pulled from the same sources, filtered to the same date range. Related videos from the current video's channel and keywords are mixed in.
 
-**Endscreen overlay.** When a video ends, YouTube's endscreen is replaced with a 3x4 grid of WayBackTube recommendations overlaid on the player.
+**Endscreen overlay.** When a video ends, YouTube's endscreen is replaced with a 3x4 grid of iwant2gob4ck recommendations overlaid on the player.
 
 **Date recalculation.** All relative dates on the page ("5 years ago", "2 months ago") are recalculated relative to your chosen date, not today's date. If you set the date to 2013, a video from 2012 shows "1 year ago" instead of "13 years ago".
 

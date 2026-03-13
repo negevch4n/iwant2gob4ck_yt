@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         WayBackTube
+// @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
 // @version      125
@@ -378,10 +378,10 @@
                 const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
                 if (win && typeof win.fetch === 'function') {
                     this._pageFetch = win.fetch.bind(win);
-                    console.log('[WayBackTube] Using page fetch for API calls');
+                    console.log('[iw2gb] Using page fetch for API calls');
                 }
             } catch (e) {
-                console.warn('[WayBackTube] Could not access page fetch:', e.message);
+                console.warn('[iw2gb] Could not access page fetch:', e.message);
             }
         }
 
@@ -449,7 +449,7 @@
             };
 
             if (!this._configCache) {
-                console.log('[WayBackTube] ytcfg: version=' + result.clientVersion +
+                console.log('[iw2gb] ytcfg: version=' + result.clientVersion +
                     ', key=' + result.apiKey.substring(0, 10) + '...' +
                     ', fullContext=' + (fullContext ? 'YES' : 'NO'));
             }
@@ -482,11 +482,11 @@
                 }
                 // 403 is expected (Tampermonkey proxy detection) — silently fall through to GM
                 if (resp.status !== 403) {
-                    console.warn(`[WayBackTube] page fetch HTTP ${resp.status}`);
+                    console.warn(`[iw2gb] page fetch HTTP ${resp.status}`);
                 }
                 return null; // fall through to GM_xmlhttpRequest
             } catch (e) {
-                console.warn('[WayBackTube] page fetch error:', e.message);
+                console.warn('[iw2gb] page fetch error:', e.message);
                 return null;
             }
         }
@@ -573,7 +573,7 @@
             } catch (err) {
                 // Retry once on 403/5xx with fresh config
                 if (err.status === 403 || (err.status >= 500 && err.status < 600)) {
-                    console.warn(`[WayBackTube] ${endpoint} got ${err.status}, retrying in 1s...`);
+                    console.warn(`[iw2gb] ${endpoint} got ${err.status}, retrying in 1s...`);
                     this._configCache = null;
                     await new Promise(r => setTimeout(r, 1000));
 
@@ -627,7 +627,7 @@
                     }
                 }
             } catch (e) {
-                console.warn('[WayBackTube] Parse error:', e.message);
+                console.warn('[iw2gb] Parse error:', e.message);
             }
             return results;
         }
@@ -1031,7 +1031,7 @@
             const names = ['subscriptions', 'searchTerms', 'categories', 'topics'];
             results.forEach((r, i) => {
                 if (r.status === 'rejected') {
-                    console.warn(`[WayBackTube] ${names[i]} fetch failed:`, r.reason?.message || r.reason);
+                    console.warn(`[iw2gb] ${names[i]} fetch failed:`, r.reason?.message || r.reason);
                 }
             });
 
@@ -1227,7 +1227,7 @@
                 if (merged.length) Store.setCacheEntry(cacheKey, merged);
                 return merged;
             } catch (e) {
-                console.warn('[WayBackTube] Recommendations error:', e.message);
+                console.warn('[iw2gb] Recommendations error:', e.message);
                 return [];
             }
         }
@@ -1792,7 +1792,7 @@
                             Store.addSeenIds(fresh.map(v => v.id));
                         }
                     } catch (e) {
-                        console.warn('[WayBackTube] Infinite scroll fetch error:', e.message);
+                        console.warn('[iw2gb] Infinite scroll fetch error:', e.message);
                     } finally {
                         self._infiniteScrollFetching = false;
                         loadingMore.style.display = 'none';
@@ -1839,7 +1839,7 @@
                 // Progressively fetch real publish dates in the background
                 this._enrichCardDates(this.allVideos);
             } catch (e) {
-                console.error('[WayBackTube] Homepage load error:', e);
+                console.error('[iw2gb] Homepage load error:', e);
                 // Verify container still exists before updating it
                 if (document.body.contains(container)) {
                     _clear(container);
@@ -1939,7 +1939,7 @@
                 this._sidebarReplaced = true;
                 this._sidebarLoading = false;
             } catch (e) {
-                console.warn('[WayBackTube] Sidebar error:', e.message);
+                console.warn('[iw2gb] Sidebar error:', e.message);
                 if (document.body.contains(container)) {
                     _clear(container);
                 }
@@ -2018,7 +2018,7 @@
                 this._endscreenReplaced = true;
                 this._endscreenLoading = false;
             } catch (e) {
-                console.warn('[WayBackTube] Endscreen error:', e.message);
+                console.warn('[iw2gb] Endscreen error:', e.message);
                 if (document.body.contains(overlay)) overlay.remove();
                 this._endscreenLoading = false;
             }
@@ -2195,7 +2195,7 @@
                 this._channelReplaced = true;
                 this._channelLoading = false;
             } catch (e) {
-                console.warn('[WayBackTube] Channel page error:', e.message);
+                console.warn('[iw2gb] Channel page error:', e.message);
                 if (document.body.contains(container)) {
                     _clear(container);
                     container.appendChild(VideoRenderer.errorMessage(e.message));
@@ -2319,7 +2319,7 @@
             if (!lastRefresh) return;
             const elapsed = Date.now() - lastRefresh;
             if (elapsed >= 3600000 && this._isHomePage()) { // 1 hour
-                console.log('[WayBackTube] Hourly refresh triggered');
+                console.log('[iw2gb] Hourly refresh triggered');
                 Store.setLastRefresh(Date.now()); // update BEFORE refresh to prevent re-triggering
                 this._refreshHomepage();
             }
@@ -2333,7 +2333,7 @@
     class ThemeEngine {
         static inject() {
             GM_addStyle(`
-                /* === WayBackTube 2011 Flat Theme === */
+                /* === iwant2gob4ck 2011 Flat Theme === */
 
                 /* Global overrides — square corners, no shadows, no animations */
                 ytd-app,
@@ -2399,7 +2399,7 @@
                     display: none !important;
                 }
 
-                /* === WayBackTube Custom Components (2009 YouTube style) === */
+                /* === iwant2gob4ck Custom Components (2009 YouTube style) === */
 
                 /* Homepage / channel grid — span full width of YouTube's grid */
                 .wbt-container,
@@ -3473,7 +3473,7 @@
         _buildFab() {
             const fab = _el('button', 'wbt-fab');
             fab.id = 'wbt-fab';
-            fab.title = 'Open WayBackTube panel';
+            fab.title = 'Open iwant2gob4ck panel';
             fab.style.display = 'none';
 
             // Restore saved Y position
@@ -3531,7 +3531,7 @@
             // Header
             const header = _el('div', 'wbt-panel-header');
             header.id = 'wbt-drag-handle';
-            header.appendChild(_el('span', 'wbt-panel-title', 'WayBackTube'));
+            header.appendChild(_el('span', 'wbt-panel-title', 'iwant2gob4ck'));
 
             const controls = _el('div', 'wbt-panel-controls');
             const statusBadge = _el('span', `wbt-status ${active ? 'active' : 'inactive'}`, active ? 'ON' : 'OFF');
@@ -3677,7 +3677,7 @@
             this.panel.appendChild(body);
             document.body.appendChild(this.panel);
             this._attachEvents();
-            try { this._refreshAllLists(); } catch (e) { console.error('[WayBackTube] List refresh error:', e); }
+            try { this._refreshAllLists(); } catch (e) { console.error('[iw2gb] List refresh error:', e); }
         }
 
         _buildSection(title, id, openByDefault, children) {
@@ -4303,12 +4303,12 @@
         // --- Refresh all ---
 
         _refreshAllLists() {
-            try { this._refreshSubsList(); } catch (e) { console.error('[WayBackTube] Subs list error:', e); }
-            try { this._refreshTermsList(); } catch (e) { console.error('[WayBackTube] Terms list error:', e); }
-            try { this._refreshCatsGrid(); } catch (e) { console.error('[WayBackTube] Cats grid error:', e); }
-            try { this._refreshTopicsList(); } catch (e) { console.error('[WayBackTube] Topics list error:', e); }
-            try { this._refreshBlockList(); } catch (e) { console.error('[WayBackTube] Block list error:', e); }
-            try { this._refreshStats(); } catch (e) { console.error('[WayBackTube] Stats error:', e); }
+            try { this._refreshSubsList(); } catch (e) { console.error('[iw2gb] Subs list error:', e); }
+            try { this._refreshTermsList(); } catch (e) { console.error('[iw2gb] Terms list error:', e); }
+            try { this._refreshCatsGrid(); } catch (e) { console.error('[iw2gb] Cats grid error:', e); }
+            try { this._refreshTopicsList(); } catch (e) { console.error('[iw2gb] Topics list error:', e); }
+            try { this._refreshBlockList(); } catch (e) { console.error('[iw2gb] Block list error:', e); }
+            try { this._refreshStats(); } catch (e) { console.error('[iw2gb] Stats error:', e); }
         }
 
         // --- Toast ---
@@ -4336,26 +4336,26 @@
 
     class App {
         static async init() {
-            console.log('[WayBackTube] Initializing v123...');
+            console.log('[iw2gb] Initializing v125...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
             if (Math.abs(offset) > 86400000) {
-                console.warn('[WayBackTube] Time offset was insane (' + offset + 'ms), resetting to 0');
+                console.warn('[iw2gb] Time offset was insane (' + offset + 'ms), resetting to 0');
                 Store.setTimeOffset(0);
             }
 
             // Clear ALL caches on version upgrade (prevents stale data from broken versions)
             const lastVersion = Store._get('wbt_last_version', 0);
             if (lastVersion < 119) {
-                console.log('[WayBackTube] Version upgrade detected, clearing all caches...');
+                console.log('[iw2gb] Version upgrade detected, clearing all caches...');
                 try {
                     const allKeys = GM_listValues();
                     for (const key of allKeys) {
                         if (key.startsWith('wbt_cache_')) GM_deleteValue(key);
                     }
                 } catch (e) {
-                    console.warn('[WayBackTube] Cache clear failed:', e);
+                    console.warn('[iw2gb] Cache clear failed:', e);
                 }
                 Store._set('wbt_last_version', 119);
             }
@@ -4384,7 +4384,7 @@
             // Re-inject panel/fab if YouTube nukes them (SPA navigation can destroy elements)
             setInterval(() => {
                 if (!document.getElementById('wbt-panel') && !document.getElementById('wbt-fab')) {
-                    console.log('[WayBackTube] Panel was removed, re-injecting...');
+                    console.log('[iw2gb] Panel was removed, re-injecting...');
                     uiPanel.init();
                 }
             }, 2000);
@@ -4396,7 +4396,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[WayBackTube] v123 Ready. Date:', Store.getCurrentDate(),
+            console.log('[iw2gb] v125 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
@@ -4416,12 +4416,12 @@
                             const drift = serverTime - Date.now();
                             // Cap drift at 24 hours — anything beyond is likely garbage
                             if (Math.abs(drift) > 86400000) {
-                                console.warn('[WayBackTube] Time API returned suspicious drift, ignoring');
+                                console.warn('[iw2gb] Time API returned suspicious drift, ignoring');
                                 return;
                             }
                             Store.setTimeOffset(Math.abs(drift) > 30000 ? drift : 0);
                             if (Math.abs(drift) > 30000) {
-                                console.log(`[WayBackTube] Clock drift corrected: ${Math.round(drift / 1000)}s`);
+                                console.log(`[iw2gb] Clock drift corrected: ${Math.round(drift / 1000)}s`);
                             }
                         } catch { /* ignore parse errors */ }
                     },
