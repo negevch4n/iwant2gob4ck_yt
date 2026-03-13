@@ -162,9 +162,11 @@
         static isMinimized()        { return this._get('wbt_minimized', false); }
         static setMinimized(v)      { this._set('wbt_minimized', v); }
 
-        // --- Collapsed state (tiny FAB button) ---
+        // --- Collapsed state (tiny tab) ---
         static isCollapsed()        { return this._get('wbt_collapsed', false); }
         static setCollapsed(v)      { this._set('wbt_collapsed', v); }
+        static getTabY()            { return this._get('wbt_tab_y', null); }
+        static setTabY(v)           { this._set('wbt_tab_y', v); }
 
         // --- Custom logo (data URL) ---
         static getCustomLogo()      { return this._get('wbt_custom_logo', null); }
@@ -715,7 +717,7 @@
                 publishedAfter,
                 publishedBefore,
                 maxResults: maxResults || CONFIG.api.maxResults,
-                order: 'viewCount',
+                order: 'relevance',
                 categoryId,
             });
         }
@@ -944,7 +946,7 @@
                         publishedAfter: dateWindow.after,
                         publishedBefore: dateWindow.before,
                         maxResults: perTopic,
-                        order: 'viewCount',
+                        order: 'relevance',
                     });
                 })
             );
@@ -1268,7 +1270,7 @@
                     publishedAfter: dateWindow.after,
                     publishedBefore: dateWindow.before,
                     maxResults: 5,
-                    order: 'viewCount',
+                    order: 'relevance',
                 }));
             }
 
@@ -3284,28 +3286,40 @@
                     display: none !important;
                 }
 
-                /* === Panel collapse FAB === */
+                /* === Panel collapse tab === */
                 .wbt-fab {
                     position: fixed;
-                    bottom: 16px;
-                    right: 16px;
-                    width: 36px;
-                    height: 36px;
+                    right: 0;
+                    top: 50%;
+                    width: 16px;
+                    height: 40px;
                     background: #cc0000;
                     color: #fff;
                     border: none;
+                    border-radius: 4px 0 0 4px;
                     cursor: pointer;
                     z-index: 99999;
-                    font-family: Arial, Helvetica, sans-serif;
-                    font-size: 11px;
-                    font-weight: bold;
+                    font-size: 0;
+                    padding: 0;
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                    box-shadow: -1px 1px 4px rgba(0,0,0,0.3);
+                    transition: width 0.15s, background 0.15s;
+                }
+                .wbt-fab::after {
+                    content: '';
+                    display: block;
+                    width: 0;
+                    height: 0;
+                    border-top: 5px solid transparent;
+                    border-bottom: 5px solid transparent;
+                    border-right: 5px solid #fff;
+                    margin-right: 1px;
                 }
                 .wbt-fab:hover {
                     background: #aa0000;
+                    width: 20px;
                 }
 
                 /* Logo upload section */
@@ -3457,15 +3471,50 @@
         }
 
         _buildFab() {
-            const fab = _el('button', 'wbt-fab', 'WBT');
+            const fab = _el('button', 'wbt-fab');
             fab.id = 'wbt-fab';
             fab.title = 'Open WayBackTube panel';
             fab.style.display = 'none';
+
+            // Restore saved Y position
+            const savedY = Store.getTabY();
+            if (savedY !== null) {
+                fab.style.top = savedY + 'px';
+            }
+
+            // Drag vertically along right edge
+            let dragging = false, startY, startTop, didDrag = false;
+
+            fab.addEventListener('mousedown', (e) => {
+                dragging = true;
+                didDrag = false;
+                startY = e.clientY;
+                startTop = fab.getBoundingClientRect().top;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                const dy = e.clientY - startY;
+                if (Math.abs(dy) > 3) didDrag = true;
+                const newTop = Math.max(0, Math.min(window.innerHeight - fab.offsetHeight, startTop + dy));
+                fab.style.top = newTop + 'px';
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (dragging) {
+                    dragging = false;
+                    Store.setTabY(parseInt(fab.style.top));
+                }
+            });
+
             fab.addEventListener('click', () => {
+                if (didDrag) return; // don't open panel if user was dragging
                 Store.setCollapsed(false);
                 this.panel.style.display = '';
                 fab.style.display = 'none';
             });
+
             document.body.appendChild(fab);
         }
 
