@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      134
+// @version      135
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2303,49 +2303,27 @@
                     }
                 };
 
-                // Detect when user scrolls near bottom
-                const isNearBottom = () => {
-                    // Check ALL possible scroll containers
-                    const candidates = [
-                        document.scrollingElement,
-                        document.documentElement,
-                        document.body,
-                        document.querySelector('ytd-app'),
-                        document.querySelector('#page-manager'),
-                        document.querySelector('ytd-browse'),
-                    ];
-                    for (const el of candidates) {
-                        if (!el) continue;
-                        if (el.scrollHeight <= el.clientHeight) continue;
-                        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1500) {
-                            return true;
-                        }
-                    }
-                    // Also check if the grid bottom is visible in viewport
-                    const rect = videoGrid.getBoundingClientRect();
-                    if (rect.bottom < window.innerHeight + 1500) {
-                        return true;
-                    }
-                    return false;
-                };
+                // Use IntersectionObserver to detect when the sentinel nears the viewport.
+                // This is far more reliable than scroll math on YouTube's SPA.
+                const sentinel = document.createElement('div');
+                sentinel.className = 'wbt-scroll-sentinel';
+                sentinel.style.cssText = 'height:1px;width:100%;';
+                container.appendChild(sentinel);
 
-                const checkScroll = () => {
-                    if (!self._infiniteScrollActive || self._infiniteScrollFetching) return;
-                    if (isNearBottom()) {
+                const observer = new IntersectionObserver((entries) => {
+                    if (entries[0].isIntersecting && self._infiniteScrollActive && !self._infiniteScrollFetching) {
                         fetchAndAppend();
                     }
-                };
+                }, { rootMargin: '1500px' });
+                observer.observe(sentinel);
 
-                // Listen for scroll on multiple targets
-                document.addEventListener('scroll', checkScroll, true);
-                document.addEventListener('wheel', checkScroll, { passive: true });
-                window.addEventListener('scroll', checkScroll, { passive: true });
-                // Polling fallback — more frequent
-                const scrollPoll = setInterval(() => {
-                    if (!document.body.contains(videoGrid)) { clearInterval(scrollPoll); return; }
-                    if (!self._infiniteScrollActive) { clearInterval(scrollPoll); return; }
-                    checkScroll();
-                }, 1000);
+                // Cleanup observer when grid is removed
+                const cleanupPoll = setInterval(() => {
+                    if (!document.body.contains(videoGrid)) {
+                        observer.disconnect();
+                        clearInterval(cleanupPoll);
+                    }
+                }, 2000);
 
                 this._homepageReplaced = true;
                 this._homepageLoading = false;
