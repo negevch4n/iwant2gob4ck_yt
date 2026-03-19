@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      133
+// @version      134
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -275,6 +275,57 @@
             this.setSeenIds(ids);
         }
         static clearSeenIds()       { this._del('wbt_seen_ids'); }
+
+        // --- Impression tracking (hide overexposed videos from feed/recommendations) ---
+        // Structure: { [videoId]: { count: number, hiddenUntil: number|0 } }
+        static getImpressions()     { return this._get('wbt_impressions', {}); }
+        static setImpressions(imp)  { this._set('wbt_impressions', imp); }
+
+        // Record that these video IDs were shown. When count hits 3, hide for 1 week.
+        static recordImpressions(videoIds) {
+            const imp = this.getImpressions();
+            const now = Date.now();
+            const HIDE_DURATION = 7 * 86400000; // 1 week
+
+            for (const id of videoIds) {
+                if (!imp[id]) imp[id] = { count: 0, hiddenUntil: 0 };
+                const entry = imp[id];
+
+                // If it was hidden but the hiding period expired, reset its counter
+                if (entry.hiddenUntil && entry.hiddenUntil <= now) {
+                    entry.count = 0;
+                    entry.hiddenUntil = 0;
+                }
+
+                entry.count++;
+
+                if (entry.count >= 3) {
+                    entry.hiddenUntil = now + HIDE_DURATION;
+                    entry.count = 0; // reset so it gets a fresh counter when it comes back
+                }
+            }
+
+            // Prune: remove entries that are fully expired (not hidden and count 0)
+            // and cap at 5000 entries
+            const keys = Object.keys(imp);
+            if (keys.length > 5000) {
+                // Remove oldest expired entries first
+                const expiredKeys = keys.filter(k => !imp[k].hiddenUntil && imp[k].count === 0);
+                for (const k of expiredKeys.slice(0, keys.length - 4000)) {
+                    delete imp[k];
+                }
+            }
+
+            this.setImpressions(imp);
+        }
+
+        // Check if a video is currently hidden due to overexposure
+        static isImpressionHidden(videoId) {
+            const imp = this.getImpressions();
+            const entry = imp[videoId];
+            if (!entry || !entry.hiddenUntil) return false;
+            return entry.hiddenUntil > Date.now();
+        }
 
         // Returns the current simulated date string (YYYY-MM-DD).
         // If clock is active, advances in real time from the set date.
@@ -1373,10 +1424,13 @@
             const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics, trending }, weights);
             const deduped = this._dedupe(mixed);
 
+            // Filter out videos hidden due to overexposure (shown 3+ times → hidden for 1 week)
+            const notHidden = deduped.filter(v => !Store.isImpressionHidden(v.id));
+
             // Deprioritize recently seen videos so refreshes show new content
             const seen = new Set(Store.getSeenIds());
-            const unseen = deduped.filter(v => !seen.has(v.id));
-            const seenVids = deduped.filter(v => seen.has(v.id));
+            const unseen = notHidden.filter(v => !seen.has(v.id));
+            const seenVids = notHidden.filter(v => seen.has(v.id));
 
             return [
                 ...this._weightedShuffle(unseen, dateWindow.center),
@@ -1411,8 +1465,8 @@
             const mixed = this._mixSources({ subscriptions, searchTerms, categories, topics, trending });
             const deduped = this._dedupe(mixed);
 
-            // Filter out already-displayed videos
-            const fresh = deduped.filter(v => !excludeIds.has(v.id));
+            // Filter out already-displayed videos and impression-hidden videos
+            const fresh = deduped.filter(v => !excludeIds.has(v.id) && !Store.isImpressionHidden(v.id));
 
             return this._weightedShuffle(fresh, dateWindow.center);
         }
@@ -1567,8 +1621,9 @@
 
                 // Interleave: related videos scattered among random ones
                 // Place a related video roughly every 3-4 slots
-                const related = this._dedupe(relatedVideos).filter(v => v.id !== currentVideoId);
-                const random = this._dedupe(randomVideos).filter(v => v.id !== currentVideoId);
+                // Also filter out impression-hidden videos
+                const related = this._dedupe(relatedVideos).filter(v => v.id !== currentVideoId && !Store.isImpressionHidden(v.id));
+                const random = this._dedupe(randomVideos).filter(v => v.id !== currentVideoId && !Store.isImpressionHidden(v.id));
 
                 const merged = [];
                 let ri = 0, di = 0;
@@ -1907,6 +1962,23 @@
                     const videoId = new URLSearchParams(location.search).get('v');
                     if (videoId && this._videoMetaMap.has(videoId)) {
                         this._pendingWatch = { videoId, meta: this._videoMetaMap.get(videoId), startedAt: Date.now() };
+                    } else if (videoId) {
+                        // Video not in meta map (e.g. from search, channel page, direct link).
+                        // Fetch its details so we can still track the watch.
+                        this._pendingWatch = null;
+                        this.feedEngine.api.getVideoDetails([videoId]).then(details => {
+                            if (details.length && this._isVideoPage()) {
+                                const d = details[0];
+                                const meta = { channel: d.channel || '', channelId: d.channelId || '', title: d.title || '' };
+                                this._videoMetaMap.set(videoId, meta);
+                                // Only set pending if we're still on this video page
+                                const currentId = new URLSearchParams(location.search).get('v');
+                                if (currentId === videoId) {
+                                    this._pendingWatch = { videoId, meta, startedAt: Date.now() };
+                                    console.log('[iw2gb] Late-resolved watch tracking for:', meta.channel, '-', meta.title);
+                                }
+                            }
+                        }).catch(() => {});
                     } else {
                         this._pendingWatch = null;
                     }
@@ -2212,6 +2284,7 @@
                             }
                             self._enrichCardDates(retry);
                             Store.addSeenIds(retry.map(v => v.id));
+                            Store.recordImpressions(retry.map(v => v.id));
                         } else {
                             for (const video of fresh) {
                                 videoGrid.appendChild(VideoRenderer.homepageCard(video));
@@ -2220,6 +2293,7 @@
                             }
                             self._enrichCardDates(fresh);
                             Store.addSeenIds(fresh.map(v => v.id));
+                            Store.recordImpressions(fresh.map(v => v.id));
                         }
                     } catch (e) {
                         console.warn('[iw2gb] Infinite scroll fetch error:', e.message);
@@ -2279,6 +2353,9 @@
 
                 // Track displayed video IDs so next refresh shows different ones
                 Store.addSeenIds(this.allVideos.map(v => v.id));
+
+                // Record impressions for overexposure tracking
+                Store.recordImpressions(this.allVideos.map(v => v.id));
 
                 // Progressively fetch real publish dates in the background
                 this._enrichCardDates(this.allVideos);
@@ -2381,6 +2458,9 @@
                     this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                 }
 
+                // Record impressions for overexposure tracking
+                Store.recordImpressions(recommendations.map(v => v.id));
+
                 this._sidebarReplaced = true;
                 this._sidebarLoading = false;
             } catch (e) {
@@ -2459,6 +2539,9 @@
                     grid.appendChild(VideoRenderer.endscreenCard(video));
                     this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                 }
+
+                // Record impressions for overexposure tracking
+                Store.recordImpressions(endscreenVideos.map(v => v.id));
 
                 overlay.appendChild(grid);
                 this._endscreenReplaced = true;
