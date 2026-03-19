@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      138
+// @version      139
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2864,36 +2864,52 @@
             const cutoff = new Date(setDate);
             cutoff.setFullYear(cutoff.getFullYear() + 2);
 
+            // Match both old (ytd-comment-renderer) and new (ytd-comment-view-model) layouts
             const comments = document.querySelectorAll(
                 'ytd-comment-thread-renderer:not([data-wbt-comment-checked]),' +
-                'ytd-comment-renderer:not([data-wbt-comment-checked])'
+                'ytd-comment-renderer:not([data-wbt-comment-checked]),' +
+                'ytd-comment-view-model:not([data-wbt-comment-checked])'
             );
 
             for (const comment of comments) {
                 comment.setAttribute('data-wbt-comment-checked', '1');
 
                 // Always show your own comments regardless of date filter
-                if (comment.querySelector('#author-comment-badge, ytd-author-comment-badge-renderer')) {
+                if (comment.querySelector(
+                    '#author-comment-badge,' +
+                    'ytd-author-comment-badge-renderer,' +
+                    '.ytd-author-comment-badge-renderer,' +
+                    '[is-creator],' +
+                    '[creator-badge]'
+                )) {
                     continue;
                 }
 
+                // Find the time element across multiple YouTube layouts
                 const timeEl = comment.querySelector(
                     '#published-time-text a,' +
                     '#published-time-text yt-formatted-string,' +
+                    '#published-time-text span,' +
                     'yt-formatted-string.published-time-text a,' +
-                    '.published-time-text a'
+                    '.published-time-text a,' +
+                    '.published-time-text span,' +
+                    'a[href*="lc="],' +
+                    '#header-author a.yt-simple-endpoint[href*="lc="]'
                 );
                 if (!timeEl) continue;
 
                 const rawText = timeEl.textContent.trim();
+                if (!rawText) continue;
                 const cleanText = rawText.replace(/\s*\(edited\)\s*$/, '');
                 const approxDate = DateHelper.approxPublishDate(cleanText);
                 if (!approxDate) continue;
 
                 if (approxDate.getTime() > cutoff.getTime()) {
                     // Comment posted more than 2 years after set date — hide
-                    comment.style.display = 'none';
-                    comment.dataset.wbtHidden = '1';
+                    // Hide at the thread level if possible so replies are also hidden
+                    const thread = comment.closest('ytd-comment-thread-renderer') || comment;
+                    thread.style.display = 'none';
+                    thread.dataset.wbtHidden = '1';
                 } else {
                     // Rewrite date relative to set date
                     const newText = DateHelper.relativeToDate(approxDate, setDate);
