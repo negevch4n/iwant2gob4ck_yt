@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      135
+// @version      136
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -1089,6 +1089,19 @@
             return { after, before, center: d };
         }
 
+        // --- Round-robin interleave: ensures even spread across sub-sources ---
+
+        _interleave(batches) {
+            const result = [];
+            const maxLen = Math.max(0, ...batches.map(b => b.length));
+            for (let i = 0; i < maxLen; i++) {
+                for (const batch of batches) {
+                    if (i < batch.length) result.push(batch[i]);
+                }
+            }
+            return result;
+        }
+
         // --- Deduplication ---
 
         _dedupe(videos) {
@@ -1165,9 +1178,9 @@
                 })
             );
 
-            const videos = batches
-                .filter(r => r.status === 'fulfilled')
-                .flatMap(r => r.value);
+            // Round-robin interleave so no single channel dominates the pool
+            const perSource = batches.filter(r => r.status === 'fulfilled').map(r => r.value);
+            const videos = this._interleave(perSource);
 
             if (videos.length) Store.setCacheEntry(cacheKey, videos);
             return videos;
@@ -1212,9 +1225,9 @@
                 })
             );
 
-            const videos = batches
-                .filter(r => r.status === 'fulfilled')
-                .flatMap(r => r.value);
+            // Round-robin interleave so no single term dominates the pool
+            const perSource = batches.filter(r => r.status === 'fulfilled').map(r => r.value);
+            const videos = this._interleave(perSource);
 
             if (videos.length) Store.setCacheEntry(cacheKey, videos);
             return videos;
@@ -1239,9 +1252,9 @@
                 )
             );
 
-            const videos = batches
-                .filter(r => r.status === 'fulfilled')
-                .flatMap(r => r.value);
+            // Round-robin interleave so no single category dominates the pool
+            const catSources = batches.filter(r => r.status === 'fulfilled').map(r => r.value);
+            const videos = this._interleave(catSources);
 
             if (videos.length) Store.setCacheEntry(cacheKey, videos);
             return videos;
@@ -1271,9 +1284,9 @@
                 })
             );
 
-            const videos = batches
-                .filter(r => r.status === 'fulfilled')
-                .flatMap(r => r.value);
+            // Round-robin interleave so no single topic dominates the pool
+            const topicSources = batches.filter(r => r.status === 'fulfilled').map(r => r.value);
+            const videos = this._interleave(topicSources);
 
             if (videos.length) Store.setCacheEntry(cacheKey, videos);
             return videos;
@@ -1502,7 +1515,7 @@
                     });
                 })
             );
-            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+            return this._interleave(batches.filter(r => r.status === 'fulfilled').map(r => r.value));
         }
 
         async _fetchSearchTermsUncached(dateWindow, count) {
@@ -1535,7 +1548,7 @@
                     });
                 })
             );
-            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+            return this._interleave(batches.filter(r => r.status === 'fulfilled').map(r => r.value));
         }
 
         async _fetchCategoriesUncached(dateWindow, count) {
@@ -1551,7 +1564,7 @@
                     })
                 )
             );
-            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+            return this._interleave(batches.filter(r => r.status === 'fulfilled').map(r => r.value));
         }
 
         async _fetchTopicsUncached(dateWindow, count) {
@@ -1571,7 +1584,7 @@
                     });
                 })
             );
-            return batches.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+            return this._interleave(batches.filter(r => r.status === 'fulfilled').map(r => r.value));
         }
 
         async _fetchTrendingUncached(dateWindow, count) {
@@ -2626,10 +2639,14 @@
         async _tryReplaceChannelPage() {
             if (this._channelReplaced || this._channelLoading) return;
 
+            // Try multiple selectors — YouTube changes DOM structure across versions
             const grid = document.querySelector(
                 'ytd-browse[page-subtype="channels"] ytd-rich-grid-renderer #contents,' +
                 'ytd-browse[page-subtype="channels"] ytd-section-list-renderer #contents,' +
-                'ytd-browse[page-subtype="channels"] #contents.ytd-rich-grid-renderer'
+                'ytd-browse[page-subtype="channels"] #contents.ytd-rich-grid-renderer,' +
+                'ytd-browse[page-subtype="channel"] ytd-rich-grid-renderer #contents,' +
+                'ytd-browse[page-subtype="channel"] ytd-section-list-renderer #contents,' +
+                'ytd-browse[page-subtype="channel"] #contents.ytd-rich-grid-renderer'
             );
             if (!grid) return;
 
@@ -2643,7 +2660,9 @@
             const channelNameEl = document.querySelector(
                 'ytd-channel-name #text,' +
                 'yt-dynamic-text-view-model .yt-core-attributed-string,' +
-                '#channel-header ytd-channel-name yt-formatted-string'
+                '#channel-header ytd-channel-name yt-formatted-string,' +
+                '#channel-header-container ytd-channel-name yt-formatted-string,' +
+                'ytd-c4-tabbed-header-renderer #channel-name'
             );
             const channelName = channelNameEl?.textContent?.trim();
             if (!channelName) {
@@ -2670,16 +2689,23 @@
             grid.insertBefore(container, grid.firstChild);
 
             try {
-                // Try to get channel ID from page metadata
+                // Get channel ID from page metadata
                 const channelIdMeta = document.querySelector('meta[itemprop="channelId"]')?.content
                     || document.querySelector('link[rel="canonical"]')?.href?.match(/channel\/(UC[^/]+)/)?.[1]
                     || '';
-                const videos = await this.feedEngine.api.getChannelVideos(channelName, {
-                    publishedBefore: dateStr,
-                    maxResults: 50,
-                    order: 'date',
-                    channelId: channelIdMeta,
-                });
+
+                // Search for this channel's videos before the set date, sorted by date (newest first)
+                // This is more reliable than the browse endpoint which only returns the first page
+                const q = this.feedEngine.api._buildDateQuery(`"${channelName}"`, null, dateStr);
+                const body = { query: q, params: 'CAISAhAB' }; // sort by upload date + videos only
+                const data = await this.feedEngine.api._post('search', body);
+                let videos = this.feedEngine.api._parseSearchResults(data);
+
+                // Filter to only this channel's videos (search may return others mentioning the name)
+                if (channelIdMeta) {
+                    const strict = videos.filter(v => v.channelId === channelIdMeta);
+                    if (strict.length > 0) videos = strict;
+                }
 
                 if (!document.body.contains(container)) {
                     this._channelLoading = false;
@@ -2701,11 +2727,97 @@
                 const videoGrid = _el('div', 'wbt-grid');
                 for (const video of videos) {
                     videoGrid.appendChild(VideoRenderer.homepageCard(video));
+                    this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
                 }
                 container.appendChild(videoGrid);
 
+                // Store state for infinite scroll
+                this._channelAllVideos = [...videos];
+                this._channelScrollPage = 1;
+                this._channelScrollActive = true;
+                this._channelScrollFetching = false;
+                this._channelName = channelName;
+                this._channelId = channelIdMeta;
+
+                // Infinite scroll sentinel
+                const sentinel = document.createElement('div');
+                sentinel.className = 'wbt-scroll-sentinel';
+                sentinel.style.cssText = 'height:1px;width:100%;';
+                container.appendChild(sentinel);
+
+                const loadingMore = _el('div', 'wbt-loading-more', 'Loading more videos...');
+                loadingMore.style.cssText = 'text-align:center;padding:20px;color:#aaa;font-size:14px;display:none;';
+                container.appendChild(loadingMore);
+
+                const self = this;
+                const channelFetchMore = async () => {
+                    if (!self._channelScrollActive || self._channelScrollFetching) return;
+                    if (!document.body.contains(videoGrid)) { self._channelScrollActive = false; return; }
+
+                    self._channelScrollFetching = true;
+                    loadingMore.style.display = 'block';
+
+                    try {
+                        self._channelScrollPage++;
+                        const existingIds = new Set(self._channelAllVideos.map(v => v.id));
+
+                        // Shift the date window backward for each page
+                        const d = new Date(dateStr);
+                        const daysShift = CONFIG.feed.dateWindowDays * 2 * (self._channelScrollPage - 1);
+                        d.setDate(d.getDate() - daysShift);
+                        const shiftedBefore = d.toISOString().split('T')[0];
+
+                        const q2 = self.feedEngine.api._buildDateQuery(`"${self._channelName}"`, null, shiftedBefore);
+                        const body2 = { query: q2, params: 'CAISAhAB' };
+                        const data2 = await self.feedEngine.api._post('search', body2);
+                        let moreVideos = self.feedEngine.api._parseSearchResults(data2);
+
+                        if (self._channelId) {
+                            const strict = moreVideos.filter(v => v.channelId === self._channelId);
+                            if (strict.length > 0) moreVideos = strict;
+                        }
+
+                        const fresh = moreVideos.filter(v => !existingIds.has(v.id));
+
+                        if (fresh.length === 0) {
+                            loadingMore.textContent = 'No more videos to load';
+                            loadingMore.style.display = 'block';
+                            self._channelScrollActive = false;
+                            return;
+                        }
+
+                        for (const video of fresh) {
+                            videoGrid.appendChild(VideoRenderer.homepageCard(video));
+                            self._channelAllVideos.push(video);
+                            self._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
+                        }
+                    } catch (e) {
+                        console.warn('[iw2gb] Channel infinite scroll error:', e.message);
+                    } finally {
+                        self._channelScrollFetching = false;
+                        loadingMore.style.display = 'none';
+                    }
+                };
+
+                const channelObserver = new IntersectionObserver((entries) => {
+                    if (entries[0].isIntersecting && self._channelScrollActive && !self._channelScrollFetching) {
+                        channelFetchMore();
+                    }
+                }, { rootMargin: '1500px' });
+                channelObserver.observe(sentinel);
+
+                const channelCleanup = setInterval(() => {
+                    if (!document.body.contains(videoGrid)) {
+                        channelObserver.disconnect();
+                        clearInterval(channelCleanup);
+                    }
+                }, 2000);
+
                 this._channelReplaced = true;
                 this._channelLoading = false;
+
+                // Enrich dates
+                this._enrichCardDates(videos);
             } catch (e) {
                 console.warn('[iw2gb] Channel page error:', e.message);
                 if (document.body.contains(container)) {
