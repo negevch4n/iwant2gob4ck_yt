@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      136
+// @version      137
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -1118,7 +1118,7 @@
             });
         }
 
-        // --- Weighted shuffle: bias toward videos closer to center date ---
+        // --- Weighted shuffle: gentle bias toward videos closer to center date ---
 
         _weightedShuffle(videos, centerDate) {
             const center = new Date(centerDate).getTime();
@@ -1130,7 +1130,9 @@
                 }
                 if (!pub) pub = center; // fallback to center if we can't determine date
                 const daysDiff = Math.max(1, Math.abs(center - pub) / 86400000);
-                const weight = 1 / daysDiff;
+                // Gentle curve: newer content is favored but older stuff still comes through
+                // 1 day → 1.0, 7 days → 0.53, 30 days → 0.30, 90 days → 0.22, 365 days → 0.16
+                const weight = 1 / Math.pow(daysDiff, 0.3);
                 return { v, sort: Math.random() * weight };
             });
             weighted.sort((a, b) => b.sort - a.sort);
@@ -1401,22 +1403,45 @@
         }
 
         async _buildHomeFeedInner(selectedDate) {
-            const dateWindow = this._dateWindow(selectedDate);
             const total = CONFIG.feed.maxHomepageVideos;
+            const d = new Date(selectedDate);
+
+            // Subscriptions: tight window (recent uploads from channels you follow)
+            const subWindow = this._dateWindow(selectedDate);
+
+            // Other sources: wider windows for natural temporal variety
+            // Search terms / topics: ±90 days — stuff from around that era
+            const searchWindow = {
+                after: new Date(d.getTime() - 90 * 86400000),
+                before: new Date(d.getTime() + 7 * 86400000),
+                center: d,
+            };
+            // Categories: ±180 days — broader cultural content from that period
+            const catWindow = {
+                after: new Date(d.getTime() - 180 * 86400000),
+                before: new Date(d.getTime() + 7 * 86400000),
+                center: d,
+            };
+            // Trending/discovery: up to 1 year back — surface older popular content
+            const trendWindow = {
+                after: new Date(d.getTime() - 365 * 86400000),
+                before: new Date(d.getTime() + 7 * 86400000),
+                center: d,
+            };
 
             // Learning: compute effective weights (every 10th load = exploration burst)
             const loadNum = Store.incrementLoadCount();
             const isExploration = loadNum % 10 === 0;
             const weights = isExploration ? CONFIG.feed.weights : this._getEffectiveWeights();
 
-            // Fetch all 5 sources in parallel (per-source caches still speed this up)
+            // Fetch all 5 sources in parallel with per-source date windows
             // Use allSettled so one failing source doesn't kill the whole feed
             const results = await Promise.allSettled([
-                this._fetchSubscriptions(dateWindow, Math.round(total * weights.subscriptions * 2)),
-                this._fetchSearchTerms(dateWindow, Math.round(total * weights.searchTerms * 2)),
-                this._fetchCategories(dateWindow, Math.round(total * weights.categories * 2)),
-                this._fetchTopics(dateWindow, Math.round(total * weights.topics * 2)),
-                this._fetchTrending(dateWindow, Math.round(total * weights.trending * 2)),
+                this._fetchSubscriptions(subWindow, Math.round(total * weights.subscriptions * 2)),
+                this._fetchSearchTerms(searchWindow, Math.round(total * weights.searchTerms * 2)),
+                this._fetchCategories(catWindow, Math.round(total * weights.categories * 2)),
+                this._fetchTopics(searchWindow, Math.round(total * weights.topics * 2)),
+                this._fetchTrending(trendWindow, Math.round(total * weights.trending * 2)),
             ]);
 
             const subscriptions = results[0].status === 'fulfilled' ? results[0].value : [];
@@ -1446,8 +1471,8 @@
             const seenVids = notHidden.filter(v => seen.has(v.id));
 
             return [
-                ...this._weightedShuffle(unseen, dateWindow.center),
-                ...this._weightedShuffle(seenVids, dateWindow.center),
+                ...this._weightedShuffle(unseen, d),
+                ...this._weightedShuffle(seenVids, d),
             ];
         }
 
