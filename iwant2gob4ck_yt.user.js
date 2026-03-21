@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      140
+// @version      141
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2864,56 +2864,75 @@
             const cutoff = new Date(setDate);
             cutoff.setFullYear(cutoff.getFullYear() + 2);
 
-            // Match both old (ytd-comment-renderer) and new (ytd-comment-view-model) layouts
-            const comments = document.querySelectorAll(
-                'ytd-comment-thread-renderer:not([data-wbt-comment-checked]),' +
-                'ytd-comment-renderer:not([data-wbt-comment-checked]),' +
-                'ytd-comment-view-model:not([data-wbt-comment-checked])'
+            const datePattern = /^(?:Streamed\s+)?(\d+)\s+(year|month|week|day|hour|minute|second)s?\s+ago(?:\s*\(edited\))?$/i;
+
+            // Strategy: scan the comments section for ANY element with date-like text,
+            // then walk up to find the comment boundary. This works regardless of which
+            // element names YouTube uses (ytd-*, yt-*, or anything else).
+            const commentsSection = document.querySelector(
+                'ytd-comments, #comments, #comment-section-renderer,' +
+                'yt-comments, [section-identifier="comment-item-section"]'
             );
+            if (!commentsSection) return;
 
-            for (const comment of comments) {
-                comment.setAttribute('data-wbt-comment-checked', '1');
+            // Comment wrapper selectors — covers old Polymer (ytd-) and new Lit (yt-) layouts
+            const commentWrappers = 'ytd-comment-thread-renderer, ytd-comment-renderer,' +
+                'ytd-comment-view-model, yt-comment-thread-renderer, yt-comment-renderer,' +
+                'yt-comment-view-model';
 
-                // Always show your own comments regardless of date filter
-                if (comment.querySelector(
-                    '#author-comment-badge,' +
-                    'ytd-author-comment-badge-renderer,' +
-                    '.ytd-author-comment-badge-renderer,' +
-                    '[is-creator],' +
-                    '[creator-badge]'
+            // Scan all leaf-ish text elements for date strings
+            for (const el of commentsSection.querySelectorAll('a, span, yt-formatted-string, yt-attributed-string')) {
+                if (el.dataset.wbtDateProcessed) continue;
+
+                const text = el.textContent.trim();
+                if (!text || !datePattern.test(text)) continue;
+
+                // Skip if a child already matched (avoid processing parent + child)
+                if (el.querySelector('[data-wbt-date-processed]')) continue;
+                el.dataset.wbtDateProcessed = '1';
+
+                // Walk up to find the comment container
+                const comment = el.closest(commentWrappers);
+                // If no known wrapper, walk up to find a sibling-bearing parent (the list item)
+                const container = comment
+                    || el.closest('[is-reply], [is-comment]')
+                    || (() => {
+                        let node = el.parentElement;
+                        while (node && node !== commentsSection) {
+                            if (node.parentElement && node.parentElement.children.length > 1
+                                && node.parentElement !== commentsSection) {
+                                // This node is one of several siblings — likely a list item
+                                if (node.offsetHeight > 50) return node;
+                            }
+                            node = node.parentElement;
+                        }
+                        return null;
+                    })();
+                if (!container || container.dataset.wbtCommentChecked) continue;
+                container.dataset.wbtCommentChecked = '1';
+
+                // Skip own comments
+                if (container.querySelector(
+                    '#author-comment-badge, ytd-author-comment-badge-renderer,' +
+                    '.ytd-author-comment-badge-renderer, [is-creator], [creator-badge]'
                 )) {
                     continue;
                 }
 
-                // Find the time element by searching for date-like text in the comment header.
-                // This is resilient to YouTube DOM changes — we just look for "N unit(s) ago".
-                const datePattern = /^\s*(?:Streamed\s+)?(\d+)\s+(year|month|week|day|hour|minute|second)s?\s+ago\s*(?:\(edited\))?\s*$/i;
-                let timeEl = null;
-                for (const el of comment.querySelectorAll('a, span, yt-formatted-string')) {
-                    if (datePattern.test(el.textContent.trim())) {
-                        timeEl = el;
-                        break;
-                    }
-                }
-                if (!timeEl) continue;
-
-                const rawText = timeEl.textContent.trim();
-                if (!rawText) continue;
-                const cleanText = rawText.replace(/\s*\(edited\)\s*$/, '');
+                const cleanText = text.replace(/\s*\(edited\)\s*$/, '');
                 const approxDate = DateHelper.approxPublishDate(cleanText);
                 if (!approxDate) continue;
 
                 if (approxDate.getTime() > cutoff.getTime()) {
-                    // Comment posted more than 2 years after set date — hide
-                    // Hide at the thread level if possible so replies are also hidden
-                    const thread = comment.closest('ytd-comment-thread-renderer') || comment;
+                    // Comment posted after cutoff — hide it
+                    const thread = container.closest('ytd-comment-thread-renderer, yt-comment-thread-renderer') || container;
                     thread.style.display = 'none';
                     thread.dataset.wbtHidden = '1';
                 } else {
                     // Rewrite date relative to set date
                     const newText = DateHelper.relativeToDate(approxDate, setDate);
-                    const editedSuffix = rawText.includes('(edited)') ? ' (edited)' : '';
-                    timeEl.textContent = newText + editedSuffix;
+                    const editedSuffix = text.includes('(edited)') ? ' (edited)' : '';
+                    el.textContent = newText + editedSuffix;
                 }
             }
         }
