@@ -2,8 +2,8 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      148
-// @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics. Uses V3 (VORAPIS) for theming.
+// @version      150
+// @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics. Compatible with VORAPIS & StarTube.
 // @author       You
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -12,11 +12,8 @@
 // @grant        GM_listValues
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
-// @grant        GM_getResourceText
-// @resource     v3css https://vorapis.pages.dev/product/v3/resources/jfk-all.css
 // @connect      youtube.com
 // @connect      worldtimeapi.org
-// @connect      vorapis.pages.dev
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js
 // @updateURL    https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js
@@ -108,6 +105,40 @@
             'behind the scenes', 'gameplay', 'montage', 'fail', 'epic',
         ],
     };
+
+    // =========================================================================
+    // 1b. FRONTEND DETECTOR  –  VORAPIS / StarTube / vanilla YouTube
+    // =========================================================================
+
+    class FrontendDetector {
+        static VANILLA = 'vanilla';
+        static VORAPIS = 'vorapis';
+        static STARTUBE = 'startube';
+        static _cache = null;
+        static _cacheTime = 0;
+
+        static detect() {
+            const now = Date.now();
+            if (this._cache && now - this._cacheTime < 2000) return this._cache;
+            let result = this.VANILLA;
+            if (document.getElementById('player-api_VORAPI_ELEMENT_ID')
+                || typeof window.bakend !== 'undefined'
+                || document.querySelector('.distiller_streamcontent')) {
+                result = this.VORAPIS;
+            } else if (document.getElementById('startube-settings-window')
+                || document.querySelector('[class^="st-"]')) {
+                result = this.STARTUBE;
+            }
+            this._cache = result;
+            this._cacheTime = now;
+            return result;
+        }
+
+        static isVorapis() { return this.detect() === this.VORAPIS; }
+        static isStartube() { return this.detect() === this.STARTUBE; }
+        static isVanilla() { return this.detect() === this.VANILLA; }
+        static reset() { this._cache = null; }
+    }
 
     // =========================================================================
     // 2. STORE  –  single source of truth for persistent data
@@ -1953,6 +1984,11 @@
             // SPA navigation via yt-navigate-finish event
             document.addEventListener('yt-navigate-finish', () => this._onNavChange());
 
+            // VORAPIS uses custom navigation — popstate catches browser back/forward
+            window.addEventListener('popstate', () => {
+                setTimeout(() => this._onNavChange(), 100);
+            });
+
             // Fallback: poll URL changes
             setInterval(() => {
                 if (location.href !== this._lastUrl) {
@@ -1963,6 +1999,7 @@
         }
 
         _onNavChange() {
+            FrontendDetector.reset();
             this._lastUrl = location.href;
             this._homepageReplaced = false;
             this._homepageLoading = false;
@@ -2040,6 +2077,88 @@
             return p.startsWith('/@') || p.startsWith('/channel/') || p.startsWith('/c/') || p.startsWith('/user/');
         }
 
+        // --- Frontend-aware selector helpers ---
+
+        _getHomepageGrid() {
+            if (FrontendDetector.isVorapis()) {
+                return document.querySelector(
+                    '.distiller_streamcontent,' +
+                    '#content'
+                );
+            }
+            return document.querySelector(
+                'ytd-browse[page-subtype="home"] ytd-rich-grid-renderer #contents'
+            );
+        }
+
+        _getSidebarContainer() {
+            if (FrontendDetector.isVorapis()) {
+                return document.querySelector(
+                    '.distiller_yt-sb,' +
+                    '#watch7-sidebar,' +
+                    '#secondary'
+                );
+            }
+            return document.querySelector('#secondary #related, #secondary-inner #related');
+        }
+
+        _getPlayerContainer() {
+            return document.querySelector(
+                '#movie_player,' +
+                '.html5-video-player,' +
+                '#player-api_VORAPI_ELEMENT_ID'
+            );
+        }
+
+        _getChannelGrid() {
+            if (FrontendDetector.isVorapis()) {
+                return document.querySelector(
+                    '.distiller_streamcontent,' +
+                    '#browse-items-primary'
+                );
+            }
+            return document.querySelector(
+                'ytd-browse[page-subtype="channels"] ytd-rich-grid-renderer #contents,' +
+                'ytd-browse[page-subtype="channels"] ytd-section-list-renderer #contents,' +
+                'ytd-browse[page-subtype="channels"] #contents.ytd-rich-grid-renderer,' +
+                'ytd-browse[page-subtype="channel"] ytd-rich-grid-renderer #contents,' +
+                'ytd-browse[page-subtype="channel"] ytd-section-list-renderer #contents,' +
+                'ytd-browse[page-subtype="channel"] #contents.ytd-rich-grid-renderer'
+            );
+        }
+
+        _getChannelName() {
+            if (FrontendDetector.isVorapis()) {
+                const el = document.querySelector(
+                    '.branded-page-header-title-link,' +
+                    '#channel-title,' +
+                    '.appbar-nav-avatar-and-title .branded-page-header-title'
+                );
+                return el?.textContent?.trim() || null;
+            }
+            const el = document.querySelector(
+                'ytd-channel-name #text,' +
+                'yt-dynamic-text-view-model .yt-core-attributed-string,' +
+                '#channel-header ytd-channel-name yt-formatted-string,' +
+                '#channel-header-container ytd-channel-name yt-formatted-string,' +
+                'ytd-c4-tabbed-header-renderer #channel-name'
+            );
+            return el?.textContent?.trim() || null;
+        }
+
+        _hideOriginalSidebar(sidebar) {
+            if (FrontendDetector.isVorapis()) {
+                for (const child of sidebar.children) {
+                    if (!child.classList.contains('wbt-sidebar-container')) {
+                        child.style.display = 'none';
+                    }
+                }
+            } else {
+                const original = sidebar.querySelector('#items, ytd-watch-next-secondary-results-renderer');
+                if (original) original.style.display = 'none';
+            }
+        }
+
         // --- Continuous nuking of Shorts, chips, etc. ---
 
         _startNuking() {
@@ -2079,7 +2198,7 @@
                     // Commit watch after sufficient time on video page
                     // Threshold scales with video duration: 50% of length, clamped 5s–30s
                     if (this._pendingWatch) {
-                        const videoEl = document.querySelector('video.html5-main-video');
+                        const videoEl = document.querySelector('video.html5-main-video, video');
                         const dur = videoEl && videoEl.duration && isFinite(videoEl.duration) ? videoEl.duration : 0;
                         const threshold = dur > 0 ? Math.max(5000, Math.min(30000, dur * 500)) : 30000;
                         this._pendingWatch._threshold = threshold;
@@ -2098,7 +2217,7 @@
                     }
 
                     // Endscreen: show WBT grid when video ends
-                    const video = document.querySelector('video.html5-main-video');
+                    const video = document.querySelector('video.html5-main-video, video');
                     if (video && video.ended) {
                         if (!this._endscreenReplaced && !this._endscreenLoading) {
                             this._tryReplaceEndscreen();
@@ -2123,6 +2242,7 @@
         }
 
         _hideShorts() {
+            if (FrontendDetector.isVorapis()) return;
             for (const sel of CONFIG.selectors.shorts) {
                 for (const el of document.querySelectorAll(sel)) {
                     if (!el.dataset.wbtHidden) {
@@ -2152,6 +2272,7 @@
         }
 
         _hidePlayerOverlays() {
+            if (FrontendDetector.isVorapis()) return;
             const selectors = [
                 '.ytp-suggestion-set',
                 '.ytp-videowall-still',
@@ -2171,6 +2292,7 @@
         }
 
         _hideChips() {
+            if (FrontendDetector.isVorapis()) return;
             for (const sel of CONFIG.selectors.chips) {
                 for (const el of document.querySelectorAll(sel)) {
                     if (!el.dataset.wbtHidden) {
@@ -2182,6 +2304,18 @@
         }
 
         _hideOriginalFeed() {
+            if (FrontendDetector.isVorapis()) {
+                const container = document.querySelector('.distiller_streamcontent');
+                if (container) {
+                    for (const child of container.children) {
+                        if (!child.classList.contains('wbt-container') && !child.dataset.wbtHidden) {
+                            child.style.display = 'none';
+                            child.dataset.wbtHidden = '1';
+                        }
+                    }
+                }
+                return;
+            }
             const selectors = [
                 'ytd-rich-grid-renderer > #contents > ytd-rich-item-renderer',
                 'ytd-rich-grid-renderer > #contents > ytd-rich-section-renderer',
@@ -2202,7 +2336,7 @@
         async _tryReplaceHomepage() {
             if (this._homepageReplaced || this._homepageLoading) return;
 
-            const grid = document.querySelector('ytd-browse[page-subtype="home"] ytd-rich-grid-renderer #contents');
+            const grid = this._getHomepageGrid();
             if (!grid) return;
 
             // Check if we already injected
@@ -2272,7 +2406,7 @@
                 const loadingMore = document.createElement('div');
                 loadingMore.className = 'wbt-loading-more';
                 loadingMore.textContent = 'Loading more videos...';
-                loadingMore.style.cssText = 'text-align:center;padding:20px;color:#aaa;font-size:14px;display:none;';
+                loadingMore.style.cssText = 'text-align:center;padding:20px;color:var(--wbt-text-secondary);font-size:14px;display:none;';
                 container.appendChild(loadingMore);
 
                 // Infinite scroll: fetch MORE videos from API when user nears bottom
@@ -2412,7 +2546,7 @@
         async _tryReplaceSidebar() {
             if (this._sidebarReplaced || this._sidebarLoading) return;
 
-            const sidebar = document.querySelector('#secondary #related, #secondary-inner #related');
+            const sidebar = this._getSidebarContainer();
             if (!sidebar) return;
 
             // Check if already replaced
@@ -2424,8 +2558,7 @@
             this._sidebarLoading = true;
 
             // Hide original recommendations
-            const original = sidebar.querySelector('#items, ytd-watch-next-secondary-results-renderer');
-            if (original) original.style.display = 'none';
+            this._hideOriginalSidebar(sidebar);
 
             const container = document.createElement('div');
             container.className = 'wbt-sidebar-container';
@@ -2488,7 +2621,7 @@
             if (this._endscreenReplaced || this._endscreenLoading) return;
 
             // Find the player container to overlay on
-            const player = document.querySelector('#movie_player, .html5-video-player');
+            const player = this._getPlayerContainer();
             if (!player) return;
 
             // Already injected
@@ -2612,15 +2745,7 @@
         async _tryReplaceChannelPage() {
             if (this._channelReplaced || this._channelLoading) return;
 
-            // Try multiple selectors — YouTube changes DOM structure across versions
-            const grid = document.querySelector(
-                'ytd-browse[page-subtype="channels"] ytd-rich-grid-renderer #contents,' +
-                'ytd-browse[page-subtype="channels"] ytd-section-list-renderer #contents,' +
-                'ytd-browse[page-subtype="channels"] #contents.ytd-rich-grid-renderer,' +
-                'ytd-browse[page-subtype="channel"] ytd-rich-grid-renderer #contents,' +
-                'ytd-browse[page-subtype="channel"] ytd-section-list-renderer #contents,' +
-                'ytd-browse[page-subtype="channel"] #contents.ytd-rich-grid-renderer'
-            );
+            const grid = this._getChannelGrid();
             if (!grid) return;
 
             if (grid.querySelector('.wbt-channel-container')) {
@@ -2630,14 +2755,7 @@
 
             this._channelLoading = true;
 
-            const channelNameEl = document.querySelector(
-                'ytd-channel-name #text,' +
-                'yt-dynamic-text-view-model .yt-core-attributed-string,' +
-                '#channel-header ytd-channel-name yt-formatted-string,' +
-                '#channel-header-container ytd-channel-name yt-formatted-string,' +
-                'ytd-c4-tabbed-header-renderer #channel-name'
-            );
-            const channelName = channelNameEl?.textContent?.trim();
+            const channelName = this._getChannelName();
             if (!channelName) {
                 this._channelLoading = false;
                 return;
@@ -2719,7 +2837,7 @@
                 container.appendChild(sentinel);
 
                 const loadingMore = _el('div', 'wbt-loading-more', 'Loading more videos...');
-                loadingMore.style.cssText = 'text-align:center;padding:20px;color:#aaa;font-size:14px;display:none;';
+                loadingMore.style.cssText = 'text-align:center;padding:20px;color:var(--wbt-text-secondary);font-size:14px;display:none;';
                 container.appendChild(loadingMore);
 
                 const self = this;
@@ -2834,9 +2952,18 @@
             // Only process at the thread level — view-models are nested inside threads,
             // and processing both causes double-processing (rewritten dates get re-parsed
             // against today's date and incorrectly hidden).
-            const comments = document.querySelectorAll(
-                'ytd-comment-thread-renderer:not([data-wbt-comment-checked])'
-            );
+            let comments;
+            if (FrontendDetector.isVorapis()) {
+                comments = document.querySelectorAll(
+                    '.comment-renderer:not([data-wbt-comment-checked]),' +
+                    '.comment-thread-renderer:not([data-wbt-comment-checked]),' +
+                    'ytd-comment-thread-renderer:not([data-wbt-comment-checked])'
+                );
+            } else {
+                comments = document.querySelectorAll(
+                    'ytd-comment-thread-renderer:not([data-wbt-comment-checked])'
+                );
+            }
 
             const datePattern = /^(?:Streamed\s+)?(\d+)\s+(year|month|week|day|hour|minute|second)s?\s+ago(?:\s*\(edited\))?$/i;
 
@@ -2850,7 +2977,9 @@
                     '#published-time-text yt-formatted-string,' +
                     '#published-time-text yt-core-attributed-string,' +
                     '.published-time-text a,' +
-                    '.published-time-text yt-core-attributed-string'
+                    '.published-time-text yt-core-attributed-string,' +
+                    '.comment-renderer .time-created,' +
+                    '.comment-renderer .published-time-text'
                 );
                 if (!timeEl) {
                     // Fallback: find any a, span, or yt-core-attributed-string with date-like text
@@ -2906,6 +3035,10 @@
                 'ytd-rich-item-renderer #metadata-line span',
                 'ytd-compact-video-renderer #metadata-line span',
                 '.ytd-video-meta-block',
+                // VORAPIS classic layout
+                '.watch-time-text',
+                '.video-time',
+                '.yt-lockup-meta-info li',
             ];
 
             const datePattern = /^(\d+)\s+(year|month|week|day|hour|minute|second)s?\s+ago$/i;
@@ -2960,21 +3093,103 @@
     }
 
     // =========================================================================
-    // 7. THEME ENGINE  –  V3 (VORAPIS) CSS + script component styles
+    // 7. THEME ENGINE  –  component styles with CSS custom properties
     // =========================================================================
 
     class ThemeEngine {
         static inject() {
-            // Load V3 (VORAPIS) theme CSS
-            try {
-                const v3css = GM_getResourceText('v3css');
-                if (v3css) GM_addStyle(v3css);
-            } catch (e) {
-                console.warn('[iw2gb] Failed to load V3 CSS:', e);
-            }
-
-            // Script component styles only (panel, cards, sidebar, endscreen, etc.)
             GM_addStyle(`
+                /* === CSS Custom Property Defaults === */
+                :root {
+                    /* Brand / accent */
+                    --wbt-accent: #cc0000;
+                    --wbt-accent-hover: #aa0000;
+
+                    /* Text hierarchy (light mode) */
+                    --wbt-text-primary: #333;
+                    --wbt-text-secondary: #666;
+                    --wbt-text-muted: #888;
+                    --wbt-text-link: #0033cc;
+
+                    /* Surfaces (light mode) */
+                    --wbt-surface-empty: #f2f2f2;
+                    --wbt-surface-thumb: #000;
+                    --wbt-border-light: #e0e0e0;
+
+                    /* Button (light mode) */
+                    --wbt-btn-bg: #f0f0f0;
+                    --wbt-btn-bg-hover: #e0e0e0;
+                    --wbt-btn-text: #333;
+                    --wbt-btn-border: #ccc;
+
+                    /* Panel (always dark) */
+                    --wbt-panel-bg: #1a1a1a;
+                    --wbt-panel-text: #ddd;
+                    --wbt-panel-header-bg: #111;
+                    --wbt-panel-border: #333;
+                    --wbt-panel-section-bg: #222;
+                    --wbt-panel-section-bg-hover: #2a2a2a;
+                    --wbt-panel-input-bg: #2a2a2a;
+                    --wbt-panel-input-border: #444;
+                    --wbt-panel-btn-bg: #333;
+                    --wbt-panel-btn-border: #555;
+                    --wbt-panel-btn-text: #ccc;
+                    --wbt-panel-btn-bg-hover: #444;
+                    --wbt-panel-btn-text-hover: #fff;
+                    --wbt-panel-item-border: #2a2a2a;
+                    --wbt-panel-title-text: #fff;
+                    --wbt-panel-section-title: #ccc;
+                    --wbt-panel-muted: #888;
+                    --wbt-panel-hint: #666;
+
+                    /* Status colors */
+                    --wbt-status-active-bg: #0a3d0a;
+                    --wbt-status-active-text: #4caf50;
+                    --wbt-status-inactive-bg: #3d0a0a;
+                    --wbt-status-inactive-text: #f44336;
+                    --wbt-toggle-on-bg: #2a5a2a;
+                    --wbt-toggle-on-text: #4caf50;
+                    --wbt-toggle-off-bg: #5a2a2a;
+                    --wbt-toggle-off-text: #f44;
+
+                    /* Toast */
+                    --wbt-toast-success: #2e7d32;
+                    --wbt-toast-error: #c62828;
+
+                    /* Endscreen */
+                    --wbt-endscreen-overlay: rgba(0, 0, 0, 0.85);
+                    --wbt-endscreen-text: #fff;
+                    --wbt-endscreen-text-hover: #6e9fff;
+                    --wbt-endscreen-channel: #aaa;
+
+                    /* Clock / weight */
+                    --wbt-clock-text: #4caf50;
+                    --wbt-weight-text: #4caf50;
+                    --wbt-weight-btn-bg: #444;
+                    --wbt-weight-btn-bg-hover: #666;
+
+                    /* Remove button */
+                    --wbt-remove-bg: #c00;
+                    --wbt-remove-bg-hover: #a00;
+
+                    /* Fab */
+                    --wbt-fab-bg: #cc0000;
+                    --wbt-fab-bg-hover: #aa0000;
+                }
+
+                html[dark] {
+                    --wbt-text-primary: #ddd;
+                    --wbt-text-secondary: #aaa;
+                    --wbt-text-muted: #888;
+                    --wbt-text-link: #6e9fff;
+                    --wbt-surface-empty: #1a1a1a;
+                    --wbt-border-light: #333;
+                    --wbt-btn-bg: #272727;
+                    --wbt-btn-bg-hover: #333;
+                    --wbt-btn-text: #ccc;
+                    --wbt-btn-border: #444;
+                }
+
                 /* Hide Shorts shelf & tabs everywhere */
                 ytd-reel-shelf-renderer,
                 ytd-rich-shelf-renderer[is-shorts],
@@ -3017,7 +3232,7 @@
                 }
 
                 .wbt-refresh-btn {
-                    background: #cc0000;
+                    background: var(--wbt-accent);
                     color: #fff;
                     border: none;
                     padding: 8px 16px;
@@ -3028,7 +3243,7 @@
                     letter-spacing: 0.5px;
                 }
                 .wbt-refresh-btn:hover {
-                    background: #aa0000;
+                    background: var(--wbt-accent-hover);
                 }
 
                 .wbt-grid {
@@ -3055,7 +3270,7 @@
                     width: 100%;
                     padding-bottom: 56.25%;
                     overflow: hidden;
-                    background: #000;
+                    background: var(--wbt-surface-thumb);
                 }
 
                 .wbt-thumb {
@@ -3074,7 +3289,7 @@
                     font-size: 14px;
                     font-weight: bold;
                     line-height: 1.3;
-                    color: #0033cc;
+                    color: var(--wbt-text-link);
                     display: -webkit-box;
                     -webkit-line-clamp: 2;
                     -webkit-box-orient: vertical;
@@ -3084,25 +3299,16 @@
                 .wbt-card-link:hover .wbt-card-title {
                     text-decoration: underline;
                 }
-                html[dark] .wbt-card-title {
-                    color: #6e9fff;
-                }
 
                 .wbt-card-channel {
                     font-size: 12px;
-                    color: #666;
+                    color: var(--wbt-text-secondary);
                     margin-bottom: 2px;
-                }
-                html[dark] .wbt-card-channel {
-                    color: #aaa;
                 }
 
                 .wbt-card-meta {
                     font-size: 12px;
-                    color: #666;
-                }
-                html[dark] .wbt-card-meta {
-                    color: #888;
+                    color: var(--wbt-text-muted);
                 }
 
                 .wbt-dot {
@@ -3116,17 +3322,13 @@
 
                 .wbt-sidebar-header {
                     font-weight: bold;
-                    color: #333;
+                    color: var(--wbt-text-primary);
                     padding: 0 0 12px 0;
-                    border-bottom: 1px solid #e0e0e0;
+                    border-bottom: 1px solid var(--wbt-border-light);
                     margin-bottom: 12px;
                     text-transform: uppercase;
                     letter-spacing: 0.5px;
                     font-size: 11px;
-                }
-                html[dark] .wbt-sidebar-header {
-                    color: #ccc;
-                    border-bottom-color: #333;
                 }
 
                 .wbt-sidebar-card {
@@ -3145,7 +3347,7 @@
                     width: 168px;
                     height: 94px;
                     overflow: hidden;
-                    background: #000;
+                    background: var(--wbt-surface-thumb);
                 }
 
                 .wbt-sidebar-thumb {
@@ -3163,7 +3365,7 @@
                     font-size: 13px;
                     font-weight: bold;
                     line-height: 1.3;
-                    color: #0033cc;
+                    color: var(--wbt-text-link);
                     display: -webkit-box;
                     -webkit-line-clamp: 2;
                     -webkit-box-orient: vertical;
@@ -3173,69 +3375,48 @@
                 .wbt-sidebar-link:hover .wbt-sidebar-title {
                     text-decoration: underline;
                 }
-                html[dark] .wbt-sidebar-title {
-                    color: #6e9fff;
-                }
 
                 .wbt-sidebar-channel {
                     font-size: 11px;
-                    color: #666;
+                    color: var(--wbt-text-secondary);
                     margin-bottom: 2px;
-                }
-                html[dark] .wbt-sidebar-channel {
-                    color: #aaa;
                 }
 
                 .wbt-sidebar-meta {
                     font-size: 11px;
-                    color: #666;
-                }
-                html[dark] .wbt-sidebar-meta {
-                    color: #888;
+                    color: var(--wbt-text-muted);
                 }
 
                 /* Loading / empty states */
                 .wbt-loading {
                     text-align: center;
                     padding: 40px;
-                    color: #666;
+                    color: var(--wbt-text-secondary);
                     font-size: 14px;
-                }
-                html[dark] .wbt-loading {
-                    color: #aaa;
                 }
 
                 .wbt-empty {
                     text-align: center;
                     padding: 40px;
-                    background: #f2f2f2;
-                }
-                html[dark] .wbt-empty {
-                    background: #1a1a1a;
+                    background: var(--wbt-surface-empty);
                 }
                 .wbt-empty h3 {
                     margin: 0 0 8px;
-                    color: #333;
-                }
-                html[dark] .wbt-empty h3 {
-                    color: #ddd;
+                    color: var(--wbt-text-primary);
                 }
                 .wbt-empty p {
                     margin: 0;
-                    color: #666;
+                    color: var(--wbt-text-secondary);
                     font-size: 13px;
-                }
-                html[dark] .wbt-empty p {
-                    color: #aaa;
                 }
 
                 /* Load more button */
                 .wbt-load-more {
                     display: block;
                     margin: 16px auto;
-                    background: #f0f0f0;
-                    color: #333;
-                    border: 1px solid #ccc;
+                    background: var(--wbt-btn-bg);
+                    color: var(--wbt-btn-text);
+                    border: 1px solid var(--wbt-btn-border);
                     padding: 10px 32px;
                     font-size: 12px;
                     font-weight: bold;
@@ -3243,32 +3424,24 @@
                     text-transform: uppercase;
                 }
                 .wbt-load-more:hover {
-                    background: #e0e0e0;
-                }
-                html[dark] .wbt-load-more {
-                    background: #272727;
-                    color: #ccc;
-                    border-color: #444;
-                }
-                html[dark] .wbt-load-more:hover {
-                    background: #333;
+                    background: var(--wbt-btn-bg-hover);
                 }
 
                 /* === Control Panel === */
 
                 .wbt-panel {
                     position: fixed;
-                    top: 60px;
+                    top: var(--wbt-panel-top, 60px);
                     right: 10px;
                     width: ${CONFIG.ui.panelWidth}px;
                     max-height: calc(100vh - 80px);
                     overflow-y: auto;
-                    background: #1a1a1a;
-                    color: #ddd;
+                    background: var(--wbt-panel-bg);
+                    color: var(--wbt-panel-text);
                     z-index: 99999;
                     font-family: Arial, Helvetica, sans-serif;
                     font-size: 12px;
-                    border: 1px solid #333;
+                    border: 1px solid var(--wbt-panel-border);
                 }
 
                 .wbt-panel-header {
@@ -3276,15 +3449,15 @@
                     justify-content: space-between;
                     align-items: center;
                     padding: 10px 12px;
-                    background: #111;
-                    border-bottom: 1px solid #333;
+                    background: var(--wbt-panel-header-bg);
+                    border-bottom: 1px solid var(--wbt-panel-border);
                     cursor: move;
                 }
 
                 .wbt-panel-title {
                     font-weight: bold;
                     font-size: 13px;
-                    color: #fff;
+                    color: var(--wbt-panel-title-text);
                 }
 
                 .wbt-panel-controls {
@@ -3295,14 +3468,14 @@
                 .wbt-panel-btn {
                     background: none;
                     border: none;
-                    color: #aaa;
+                    color: var(--wbt-panel-muted);
                     cursor: pointer;
                     font-size: 16px;
                     padding: 0 4px;
                     line-height: 1;
                 }
                 .wbt-panel-btn:hover {
-                    color: #fff;
+                    color: var(--wbt-panel-title-text);
                 }
 
                 .wbt-panel-body {
@@ -3310,7 +3483,7 @@
                 }
 
                 .wbt-section {
-                    border-bottom: 1px solid #333;
+                    border-bottom: 1px solid var(--wbt-panel-border);
                 }
 
                 .wbt-section-header {
@@ -3320,10 +3493,10 @@
                     padding: 10px 12px;
                     cursor: pointer;
                     user-select: none;
-                    background: #222;
+                    background: var(--wbt-panel-section-bg);
                 }
                 .wbt-section-header:hover {
-                    background: #2a2a2a;
+                    background: var(--wbt-panel-section-bg-hover);
                 }
 
                 .wbt-section-title {
@@ -3331,11 +3504,11 @@
                     font-size: 11px;
                     text-transform: uppercase;
                     letter-spacing: 0.5px;
-                    color: #ccc;
+                    color: var(--wbt-panel-section-title);
                 }
 
                 .wbt-section-toggle {
-                    color: #888;
+                    color: var(--wbt-panel-muted);
                     font-size: 10px;
                 }
 
@@ -3351,9 +3524,9 @@
                 .wbt-date-input {
                     width: 100%;
                     padding: 6px 8px;
-                    background: #2a2a2a;
-                    border: 1px solid #444;
-                    color: #fff;
+                    background: var(--wbt-panel-input-bg);
+                    border: 1px solid var(--wbt-panel-input-border);
+                    color: var(--wbt-panel-title-text);
                     font-size: 13px;
                     margin-bottom: 8px;
                     box-sizing: border-box;
@@ -3366,16 +3539,16 @@
                 }
 
                 .wbt-preset-btn {
-                    background: #333;
-                    border: 1px solid #555;
-                    color: #ccc;
+                    background: var(--wbt-panel-btn-bg);
+                    border: 1px solid var(--wbt-panel-btn-border);
+                    color: var(--wbt-panel-btn-text);
                     padding: 4px 10px;
                     font-size: 11px;
                     cursor: pointer;
                 }
                 .wbt-preset-btn:hover {
-                    background: #444;
-                    color: #fff;
+                    background: var(--wbt-panel-btn-bg-hover);
+                    color: var(--wbt-panel-btn-text-hover);
                 }
 
                 /* Clock */
@@ -3387,23 +3560,23 @@
                 }
 
                 .wbt-clock-btn {
-                    background: #333;
-                    border: 1px solid #555;
-                    color: #ccc;
+                    background: var(--wbt-panel-btn-bg);
+                    border: 1px solid var(--wbt-panel-btn-border);
+                    color: var(--wbt-panel-btn-text);
                     padding: 4px 12px;
                     font-size: 11px;
                     cursor: pointer;
                     white-space: nowrap;
                 }
                 .wbt-clock-btn:hover {
-                    background: #444;
-                    color: #fff;
+                    background: var(--wbt-panel-btn-bg-hover);
+                    color: var(--wbt-panel-btn-text-hover);
                 }
 
                 .wbt-clock-display {
                     font-family: 'Consolas', 'Courier New', monospace;
                     font-size: 12px;
-                    color: #4caf50;
+                    color: var(--wbt-clock-text);
                     letter-spacing: 0.5px;
                 }
 
@@ -3417,14 +3590,14 @@
                 .wbt-add-input {
                     flex: 1;
                     padding: 5px 8px;
-                    background: #2a2a2a;
-                    border: 1px solid #444;
-                    color: #fff;
+                    background: var(--wbt-panel-input-bg);
+                    border: 1px solid var(--wbt-panel-input-border);
+                    color: var(--wbt-panel-title-text);
                     font-size: 12px;
                 }
 
                 .wbt-add-btn {
-                    background: #cc0000;
+                    background: var(--wbt-accent);
                     border: none;
                     color: #fff;
                     padding: 5px 12px;
@@ -3433,7 +3606,7 @@
                     white-space: nowrap;
                 }
                 .wbt-add-btn:hover {
-                    background: #aa0000;
+                    background: var(--wbt-accent-hover);
                 }
 
                 .wbt-list {
@@ -3446,7 +3619,7 @@
                     justify-content: space-between;
                     align-items: center;
                     padding: 4px 0;
-                    border-bottom: 1px solid #2a2a2a;
+                    border-bottom: 1px solid var(--wbt-panel-item-border);
                 }
 
                 .wbt-list-name {
@@ -3455,12 +3628,12 @@
                     overflow: hidden;
                     text-overflow: ellipsis;
                     white-space: nowrap;
-                    color: #ccc;
+                    color: var(--wbt-panel-btn-text);
                     font-size: 12px;
                 }
 
                 .wbt-list-remove {
-                    background: #c00;
+                    background: var(--wbt-remove-bg);
                     border: none;
                     color: #fff;
                     padding: 2px 8px;
@@ -3470,7 +3643,7 @@
                     margin-left: 6px;
                 }
                 .wbt-list-remove:hover {
-                    background: #a00;
+                    background: var(--wbt-remove-bg-hover);
                 }
 
                 /* Weight controls */
@@ -3482,9 +3655,9 @@
                     margin-left: 4px;
                 }
                 .wbt-weight-btn {
-                    background: #444;
+                    background: var(--wbt-weight-btn-bg);
                     border: none;
-                    color: #ccc;
+                    color: var(--wbt-panel-btn-text);
                     width: 16px;
                     height: 16px;
                     font-size: 10px;
@@ -3496,12 +3669,12 @@
                     line-height: 1;
                 }
                 .wbt-weight-btn:hover {
-                    background: #666;
-                    color: #fff;
+                    background: var(--wbt-weight-btn-bg-hover);
+                    color: var(--wbt-panel-btn-text-hover);
                 }
                 .wbt-weight-label {
                     font-size: 10px;
-                    color: #4caf50;
+                    color: var(--wbt-weight-text);
                     font-weight: bold;
                     min-width: 10px;
                     text-align: center;
@@ -3519,13 +3692,13 @@
                     align-items: center;
                     gap: 4px;
                     font-size: 11px;
-                    color: #ccc;
+                    color: var(--wbt-panel-btn-text);
                     cursor: pointer;
                     padding: 2px 0;
                 }
 
                 .wbt-cat-label input {
-                    accent-color: #cc0000;
+                    accent-color: var(--wbt-accent);
                 }
 
                 /* Stats */
@@ -3543,11 +3716,11 @@
                 }
 
                 .wbt-stat-label {
-                    color: #888;
+                    color: var(--wbt-panel-muted);
                 }
 
                 .wbt-stat-value {
-                    color: #ccc;
+                    color: var(--wbt-panel-btn-text);
                     font-weight: bold;
                 }
 
@@ -3560,12 +3733,12 @@
                     text-transform: uppercase;
                 }
                 .wbt-status.active {
-                    background: #0a3d0a;
-                    color: #4caf50;
+                    background: var(--wbt-status-active-bg);
+                    color: var(--wbt-status-active-text);
                 }
                 .wbt-status.inactive {
-                    background: #3d0a0a;
-                    color: #f44336;
+                    background: var(--wbt-status-inactive-bg);
+                    color: var(--wbt-status-inactive-text);
                 }
 
                 /* Toast */
@@ -3583,24 +3756,24 @@
                 .wbt-toast.show {
                     opacity: 1;
                 }
-                .wbt-toast.success { background: #2e7d32; }
-                .wbt-toast.error   { background: #c62828; }
+                .wbt-toast.success { background: var(--wbt-toast-success); }
+                .wbt-toast.error   { background: var(--wbt-toast-error); }
 
                 /* Profile buttons */
                 .wbt-profile-actions {
                     margin-bottom: 8px;
                 }
                 .wbt-profile-import-btn {
-                    background: #333;
-                    border: 1px solid #555;
-                    color: #ccc;
+                    background: var(--wbt-panel-btn-bg);
+                    border: 1px solid var(--wbt-panel-btn-border);
+                    color: var(--wbt-panel-btn-text);
                     padding: 4px 10px;
                     font-size: 11px;
                     cursor: pointer;
                 }
                 .wbt-profile-import-btn:hover {
-                    background: #444;
-                    color: #fff;
+                    background: var(--wbt-panel-btn-bg-hover);
+                    color: var(--wbt-panel-btn-text-hover);
                 }
                 .wbt-profile-btns {
                     display: flex;
@@ -3609,16 +3782,16 @@
                     margin-left: 4px;
                 }
                 .wbt-profile-action-btn {
-                    background: #333;
-                    border: 1px solid #555;
-                    color: #ccc;
+                    background: var(--wbt-panel-btn-bg);
+                    border: 1px solid var(--wbt-panel-btn-border);
+                    color: var(--wbt-panel-btn-text);
                     padding: 2px 8px;
                     font-size: 10px;
                     cursor: pointer;
                 }
                 .wbt-profile-action-btn:hover {
-                    background: #444;
-                    color: #fff;
+                    background: var(--wbt-panel-btn-bg-hover);
+                    color: var(--wbt-panel-btn-text-hover);
                 }
 
                 /* === Panel collapse tab === */
@@ -3628,7 +3801,7 @@
                     top: 50%;
                     width: 16px;
                     height: 40px;
-                    background: #cc0000;
+                    background: var(--wbt-fab-bg);
                     color: #fff;
                     border: none;
                     border-radius: 4px 0 0 4px;
@@ -3653,7 +3826,7 @@
                     margin-right: 1px;
                 }
                 .wbt-fab:hover {
-                    background: #aa0000;
+                    background: var(--wbt-fab-bg-hover);
                     width: 20px;
                 }
 
@@ -3679,7 +3852,7 @@
                 .wbt-endscreen-container {
                     position: absolute;
                     top: 0; left: 0; right: 0; bottom: 0;
-                    background: rgba(0, 0, 0, 0.85);
+                    background: var(--wbt-endscreen-overlay);
                     display: flex;
                     align-items: center;
                     justify-content: center;
@@ -3711,7 +3884,7 @@
                     width: 100%;
                     padding-bottom: 56.25%;
                     overflow: hidden;
-                    background: #000;
+                    background: var(--wbt-surface-thumb);
                 }
 
                 .wbt-endscreen-thumb {
@@ -3730,7 +3903,7 @@
                     font-size: 12px;
                     font-weight: bold;
                     line-height: 1.3;
-                    color: #fff;
+                    color: var(--wbt-endscreen-text);
                     display: -webkit-box;
                     -webkit-line-clamp: 2;
                     -webkit-box-orient: vertical;
@@ -3739,12 +3912,30 @@
                 }
                 .wbt-endscreen-link:hover .wbt-endscreen-title {
                     text-decoration: underline;
-                    color: #6e9fff;
+                    color: var(--wbt-endscreen-text-hover);
                 }
 
                 .wbt-endscreen-channel {
                     font-size: 11px;
-                    color: #aaa;
+                    color: var(--wbt-endscreen-channel);
+                }
+
+                /* === VORAPIS layout compatibility === */
+                .distiller_streamcontent .wbt-container,
+                .distiller_streamcontent .wbt-channel-container {
+                    display: block;
+                    width: 100%;
+                    padding: 16px;
+                    box-sizing: border-box;
+                }
+                .distiller_yt-sb .wbt-sidebar-container {
+                    padding: 8px;
+                }
+
+                /* === StarTube layout compatibility === */
+                .wbt-container, .wbt-sidebar-container, .wbt-channel-container {
+                    position: relative;
+                    z-index: 1;
                 }
             `);
         }
@@ -3957,17 +4148,17 @@
             const trendingRow = _el('div', 'wbt-add-row');
             trendingRow.style.cssText = 'justify-content:space-between;align-items:center;';
             const trendingLabel = _el('span', null, 'Mix in popular videos from the era');
-            trendingLabel.style.cssText = 'color:#ccc;font-size:11px;';
+            trendingLabel.style.cssText = 'color:var(--wbt-panel-btn-text);font-size:11px;';
             const trendingToggle = _el('button', 'wbt-preset-btn');
             trendingToggle.id = 'wbt-trending-toggle';
             trendingToggle.textContent = Store.isDiscoveryEnabled() ? 'ON' : 'OFF';
             trendingToggle.style.cssText = Store.isDiscoveryEnabled()
-                ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
-                : 'background:#5a2a2a;color:#f44;min-width:40px;';
+                ? 'background:var(--wbt-toggle-on-bg);color:var(--wbt-toggle-on-text);min-width:40px;'
+                : 'background:var(--wbt-toggle-off-bg);color:var(--wbt-toggle-off-text);min-width:40px;';
             trendingRow.appendChild(trendingLabel);
             trendingRow.appendChild(trendingToggle);
             const trendingDesc = _el('div', null, 'Searches broad queries sorted by view count within your date window to surface what was popular/viral at the time.');
-            trendingDesc.style.cssText = 'color:#666;font-size:10px;margin-top:4px;line-height:1.3;';
+            trendingDesc.style.cssText = 'color:var(--wbt-panel-hint);font-size:10px;margin-top:4px;line-height:1.3;';
             trendingContainer.appendChild(trendingRow);
             trendingContainer.appendChild(trendingDesc);
             body.appendChild(this._buildSection('Trending', 'trending', false, [trendingContainer]));
@@ -3977,13 +4168,13 @@
             const learnRow = _el('div', 'wbt-add-row');
             learnRow.style.cssText = 'justify-content:space-between;align-items:center;';
             const learnLabel = _el('span', null, 'Learn from what I watch');
-            learnLabel.style.cssText = 'color:#ccc;font-size:11px;';
+            learnLabel.style.cssText = 'color:var(--wbt-panel-btn-text);font-size:11px;';
             const learnToggle = _el('button', 'wbt-preset-btn');
             learnToggle.id = 'wbt-learn-toggle';
             learnToggle.textContent = Store.isLearningEnabled() ? 'ON' : 'OFF';
             learnToggle.style.cssText = Store.isLearningEnabled()
-                ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
-                : 'background:#5a2a2a;color:#f44;min-width:40px;';
+                ? 'background:var(--wbt-toggle-on-bg);color:var(--wbt-toggle-on-text);min-width:40px;'
+                : 'background:var(--wbt-toggle-off-bg);color:var(--wbt-toggle-off-text);min-width:40px;';
             learnRow.appendChild(learnLabel);
             learnRow.appendChild(learnToggle);
 
@@ -3992,10 +4183,10 @@
 
             const learnReset = _el('button', 'wbt-preset-btn', 'Reset Learning Data');
             learnReset.id = 'wbt-learn-reset';
-            learnReset.style.cssText = 'margin-top:6px;background:#5a2a2a;color:#f44;width:100%;';
+            learnReset.style.cssText = 'margin-top:6px;background:var(--wbt-toggle-off-bg);color:var(--wbt-toggle-off-text);width:100%;';
 
             const learnDesc = _el('div', null, 'Tracks what you watch (30s+) and boosts similar channels/topics. Every 10th load uses original weights for discovery.');
-            learnDesc.style.cssText = 'color:#666;font-size:10px;margin-top:4px;line-height:1.3;';
+            learnDesc.style.cssText = 'color:var(--wbt-panel-hint);font-size:10px;margin-top:4px;line-height:1.3;';
 
             learnContainer.appendChild(learnRow);
             learnContainer.appendChild(learnStats);
@@ -4181,8 +4372,8 @@
                 const btn = this.panel.querySelector('#wbt-trending-toggle');
                 btn.textContent = nowEnabled ? 'ON' : 'OFF';
                 btn.style.cssText = nowEnabled
-                    ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
-                    : 'background:#5a2a2a;color:#f44;min-width:40px;';
+                    ? 'background:var(--wbt-toggle-on-bg);color:var(--wbt-toggle-on-text);min-width:40px;'
+                    : 'background:var(--wbt-toggle-off-bg);color:var(--wbt-toggle-off-text);min-width:40px;';
                 this._toast(nowEnabled ? 'Trending enabled' : 'Trending disabled', 'success');
             });
 
@@ -4193,8 +4384,8 @@
                 const btn = this.panel.querySelector('#wbt-learn-toggle');
                 btn.textContent = nowEnabled ? 'ON' : 'OFF';
                 btn.style.cssText = nowEnabled
-                    ? 'background:#2a5a2a;color:#4caf50;min-width:40px;'
-                    : 'background:#5a2a2a;color:#f44;min-width:40px;';
+                    ? 'background:var(--wbt-toggle-on-bg);color:var(--wbt-toggle-on-text);min-width:40px;'
+                    : 'background:var(--wbt-toggle-off-bg);color:var(--wbt-toggle-off-text);min-width:40px;';
                 this._toast(nowEnabled ? 'Learning enabled' : 'Learning disabled', 'success');
             });
 
@@ -4332,7 +4523,7 @@
 
             if (!subs.length) {
                 const empty = _el('div', null, 'No subscriptions');
-                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                empty.style.cssText = 'color:var(--wbt-panel-hint);text-align:center;padding:8px;';
                 list.appendChild(empty);
                 return;
             }
@@ -4411,7 +4602,7 @@
 
             if (!terms.length) {
                 const empty = _el('div', null, 'No search terms');
-                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                empty.style.cssText = 'color:var(--wbt-panel-hint);text-align:center;padding:8px;';
                 list.appendChild(empty);
                 return;
             }
@@ -4528,7 +4719,7 @@
 
             if (!topics.length) {
                 const empty = _el('div', null, 'No topics');
-                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                empty.style.cssText = 'color:var(--wbt-panel-hint);text-align:center;padding:8px;';
                 list.appendChild(empty);
                 return;
             }
@@ -4634,7 +4825,7 @@
 
             if (!blocked.length) {
                 const empty = _el('div', null, 'No blocked channels');
-                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                empty.style.cssText = 'color:var(--wbt-panel-hint);text-align:center;padding:8px;';
                 list.appendChild(empty);
                 return;
             }
@@ -4674,7 +4865,7 @@
 
             if (!names.length) {
                 const empty = _el('div', null, 'No saved profiles');
-                empty.style.cssText = 'color:#666;text-align:center;padding:8px;';
+                empty.style.cssText = 'color:var(--wbt-panel-hint);text-align:center;padding:8px;';
                 list.appendChild(empty);
                 return;
             }
@@ -4739,36 +4930,36 @@
             const channels = interests ? InterestModel.getLearnedChannels(interests) : [];
             const keywords = interests ? InterestModel.getLearnedKeywords(interests) : [];
 
-            container.style.cssText = 'margin-top:6px;font-size:11px;color:#aaa;line-height:1.5;';
+            container.style.cssText = 'margin-top:6px;font-size:11px;color:var(--wbt-text-secondary);line-height:1.5;';
 
             const watchLine = _el('div', null, `${history.length} watches tracked`);
             container.appendChild(watchLine);
 
             if (channels.length) {
                 const chTitle = _el('div', null, 'Learned channels:');
-                chTitle.style.cssText = 'color:#ccc;margin-top:4px;';
+                chTitle.style.cssText = 'color:var(--wbt-panel-btn-text);margin-top:4px;';
                 container.appendChild(chTitle);
                 for (const ch of channels.slice(0, 5)) {
                     const line = _el('div', null, `  ${ch.name} (${ch.score.toFixed(1)})`);
-                    line.style.cssText = 'color:#888;padding-left:8px;';
+                    line.style.cssText = 'color:var(--wbt-panel-muted);padding-left:8px;';
                     container.appendChild(line);
                 }
             }
 
             if (keywords.length) {
                 const kwTitle = _el('div', null, 'Learned keywords:');
-                kwTitle.style.cssText = 'color:#ccc;margin-top:4px;';
+                kwTitle.style.cssText = 'color:var(--wbt-panel-btn-text);margin-top:4px;';
                 container.appendChild(kwTitle);
                 for (const kw of keywords.slice(0, 5)) {
                     const line = _el('div', null, `  "${kw.keyword}" (${kw.score.toFixed(1)})`);
-                    line.style.cssText = 'color:#888;padding-left:8px;';
+                    line.style.cssText = 'color:var(--wbt-panel-muted);padding-left:8px;';
                     container.appendChild(line);
                 }
             }
 
             if (!channels.length && !keywords.length && history.length) {
                 const hint = _el('div', null, 'Watch more videos to build up interests');
-                hint.style.cssText = 'color:#666;font-style:italic;';
+                hint.style.cssText = 'color:var(--wbt-panel-hint);font-style:italic;';
                 container.appendChild(hint);
             }
         }
@@ -4835,7 +5026,7 @@
 
     class App {
         static async init() {
-            console.log('[iw2gb] Initializing v126...');
+            console.log('[iw2gb] Initializing v150...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -4933,8 +5124,12 @@
         static _waitForReady() {
             return new Promise(resolve => {
                 const check = () => {
-                    // Wait for YouTube's SPA shell — ytd-app is the real signal
-                    if (document.body && document.querySelector('ytd-app')) {
+                    // Wait for YouTube's SPA shell or VORAPIS's frontend
+                    if (document.body && (
+                        document.querySelector('ytd-app') ||
+                        document.getElementById('player-api_VORAPI_ELEMENT_ID') ||
+                        document.querySelector('.distiller_streamcontent')
+                    )) {
                         resolve();
                     } else {
                         setTimeout(check, 200);
