@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      139
+// @version      140
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2885,17 +2885,16 @@
                     continue;
                 }
 
-                // Find the time element across multiple YouTube layouts
-                const timeEl = comment.querySelector(
-                    '#published-time-text a,' +
-                    '#published-time-text yt-formatted-string,' +
-                    '#published-time-text span,' +
-                    'yt-formatted-string.published-time-text a,' +
-                    '.published-time-text a,' +
-                    '.published-time-text span,' +
-                    'a[href*="lc="],' +
-                    '#header-author a.yt-simple-endpoint[href*="lc="]'
-                );
+                // Find the time element by searching for date-like text in the comment header.
+                // This is resilient to YouTube DOM changes — we just look for "N unit(s) ago".
+                const datePattern = /^\s*(?:Streamed\s+)?(\d+)\s+(year|month|week|day|hour|minute|second)s?\s+ago\s*(?:\(edited\))?\s*$/i;
+                let timeEl = null;
+                for (const el of comment.querySelectorAll('a, span, yt-formatted-string')) {
+                    if (datePattern.test(el.textContent.trim())) {
+                        timeEl = el;
+                        break;
+                    }
+                }
                 if (!timeEl) continue;
 
                 const rawText = timeEl.textContent.trim();
