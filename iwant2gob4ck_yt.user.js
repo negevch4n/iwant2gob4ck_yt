@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      147
+// @version      148
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2860,8 +2860,27 @@
             if (!dateStr) return;
             const setDate = new Date(dateStr);
 
-            // 2-year leniency: show comments up to 2 years past the set date
-            const cutoff = new Date(setDate);
+            // Determine the video's approximate publish date from the page info.
+            // Use whichever is later — the video date or the set date — plus 2 years leniency.
+            // This prevents all comments being hidden on videos from outside the tight date window.
+            let videoDate = null;
+            const infoSelectors = [
+                'ytd-watch-metadata #info span',
+                'ytd-watch-metadata #info-text span',
+                '#above-the-fold #info span',
+                '#info-container span',
+                '#info-strings yt-formatted-string',
+            ];
+            for (const sel of infoSelectors) {
+                for (const el of document.querySelectorAll(sel)) {
+                    const d = DateHelper.approxPublishDate(el.textContent.trim());
+                    if (d) { videoDate = d; break; }
+                }
+                if (videoDate) break;
+            }
+
+            const baseDate = videoDate && videoDate.getTime() > setDate.getTime() ? videoDate : setDate;
+            const cutoff = new Date(baseDate);
             cutoff.setFullYear(cutoff.getFullYear() + 2);
 
             // Only process at the thread level — view-models are nested inside threads,
