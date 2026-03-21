@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      142
+// @version      143
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2880,8 +2880,10 @@
                 const timeEl = comment.querySelector(
                     '#published-time-text a,' +
                     '#published-time-text yt-formatted-string,' +
+                    '#published-time-text yt-core-attributed-string,' +
                     'yt-formatted-string.published-time-text a,' +
-                    '.published-time-text a'
+                    '.published-time-text a,' +
+                    '.published-time-text yt-core-attributed-string'
                 );
                 if (!timeEl) continue;
 
