@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      143
+// @version      144
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2866,8 +2866,11 @@
 
             const comments = document.querySelectorAll(
                 'ytd-comment-thread-renderer:not([data-wbt-comment-checked]),' +
-                'ytd-comment-renderer:not([data-wbt-comment-checked])'
+                'ytd-comment-renderer:not([data-wbt-comment-checked]),' +
+                'ytd-comment-view-model:not([data-wbt-comment-checked])'
             );
+
+            const datePattern = /^(?:Streamed\s+)?(\d+)\s+(year|month|week|day|hour|minute|second)s?\s+ago(?:\s*\(edited\))?$/i;
 
             for (const comment of comments) {
                 comment.setAttribute('data-wbt-comment-checked', '1');
@@ -2877,14 +2880,23 @@
                     continue;
                 }
 
-                const timeEl = comment.querySelector(
+                // Try specific selectors first, then fall back to finding any element with date text
+                let timeEl = comment.querySelector(
                     '#published-time-text a,' +
                     '#published-time-text yt-formatted-string,' +
                     '#published-time-text yt-core-attributed-string,' +
-                    'yt-formatted-string.published-time-text a,' +
                     '.published-time-text a,' +
                     '.published-time-text yt-core-attributed-string'
                 );
+                if (!timeEl) {
+                    // Fallback: find any a, span, or yt-core-attributed-string with date-like text
+                    for (const el of comment.querySelectorAll('a, span, yt-core-attributed-string')) {
+                        if (datePattern.test(el.textContent.trim())) {
+                            timeEl = el;
+                            break;
+                        }
+                    }
+                }
                 if (!timeEl) continue;
 
                 const rawText = timeEl.textContent.trim();
@@ -2893,9 +2905,10 @@
                 if (!approxDate) continue;
 
                 if (approxDate.getTime() > cutoff.getTime()) {
-                    // Comment posted more than 2 years after set date — hide
-                    comment.style.display = 'none';
-                    comment.dataset.wbtHidden = '1';
+                    // Comment posted more than 2 years after set date — hide at thread level
+                    const thread = comment.closest('ytd-comment-thread-renderer') || comment;
+                    thread.style.display = 'none';
+                    thread.dataset.wbtHidden = '1';
                 } else {
                     // Rewrite date relative to set date
                     const newText = DateHelper.relativeToDate(approxDate, setDate);
