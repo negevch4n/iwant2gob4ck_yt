@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @license      MIT
 // @version      148
-// @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
+// @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics. Uses V3 (VORAPIS) for theming.
 // @author       You
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -12,8 +12,11 @@
 // @grant        GM_listValues
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getResourceText
+// @resource     v3css https://vorapis.pages.dev/product/v3/resources/jfk-all.css
 // @connect      youtube.com
 // @connect      worldtimeapi.org
+// @connect      vorapis.pages.dev
 // @run-at       document-start
 // @downloadURL  https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js
 // @updateURL    https://raw.githubusercontent.com/negevch4n/iwant2gob4ck_yt/master/iwant2gob4ck_yt.user.js
@@ -191,7 +194,6 @@
                 categories: this.getCategories(),
                 topics: this.getTopics(),
                 blockedChannels: this.getBlockedChannels(),
-                customLogo: this.getCustomLogo(),
                 discovery: this.isDiscoveryEnabled(),
                 learning: this.isLearningEnabled(),
                 savedAt: Date.now(),
@@ -211,8 +213,6 @@
             if (p.blockedChannels) this.setBlockedChannels(p.blockedChannels);
             if (p.discovery !== undefined) this.setDiscoveryEnabled(p.discovery);
             if (p.learning !== undefined) this.setLearningEnabled(p.learning);
-            if (p.customLogo) this.setCustomLogo(p.customLogo);
-            else this.clearCustomLogo();
             // Reset clock so it doesn't carry over
             this.stopClock();
             return true;
@@ -246,10 +246,7 @@
         static isDiscoveryEnabled()   { return this._get('wbt_discovery', true); }
         static setDiscoveryEnabled(v) { this._set('wbt_discovery', v); }
 
-        // --- Custom logo (data URL) ---
-        static getCustomLogo()      { return this._get('wbt_custom_logo', null); }
-        static setCustomLogo(dataUrl) { this._set('wbt_custom_logo', dataUrl); }
-        static clearCustomLogo()    { this._del('wbt_custom_logo'); }
+
 
         // --- Rolling clock ---
         static isClockActive()      { return this._get('wbt_clock_active', false); }
@@ -2061,9 +2058,6 @@
                     }
                 }
 
-                // Retro logo fallback
-                this._ensureRetroLogo();
-
                 // Continuously hide original homepage content
                 if (this._isHomePage()) {
                     this._hideOriginalFeed();
@@ -2613,52 +2607,6 @@
             window.location.replace(`/results?${params.toString()}`);
         }
 
-        _ensureRetroLogo() {
-            const logoLink = document.querySelector('ytd-topbar-logo-renderer a#logo');
-            if (!logoLink) return;
-
-            const customUrl = Store.getCustomLogo();
-            const existing = logoLink.querySelector('.wbt-retro-logo');
-
-            // If custom logo changed, remove old one to rebuild
-            if (existing && customUrl && !existing.querySelector('img')) existing.remove();
-            if (existing && !customUrl && existing.querySelector('img')) existing.remove();
-            if (logoLink.querySelector('.wbt-retro-logo')) return;
-
-            // Toggle CSS pseudo-elements based on custom logo
-            if (customUrl) {
-                logoLink.classList.add('wbt-has-custom-logo');
-            } else {
-                logoLink.classList.remove('wbt-has-custom-logo');
-                // Check if CSS pseudo-elements are working
-                const style = window.getComputedStyle(logoLink, '::before');
-                if (style && style.content && style.content !== 'none' && style.content !== '""') return;
-            }
-
-            const logo = document.createElement('span');
-            logo.className = 'wbt-retro-logo';
-            logo.style.cssText = 'display:flex;align-items:center;';
-
-            if (customUrl) {
-                const img = document.createElement('img');
-                img.src = customUrl;
-                img.style.cssText = 'height:20px;width:auto;object-fit:contain;';
-                logo.appendChild(img);
-            } else {
-                logo.style.cssText += 'font-family:Arial,Helvetica,sans-serif;font-size:20px;font-weight:bold;';
-                const you = document.createElement('span');
-                you.textContent = 'You';
-                you.className = 'wbt-logo-you';
-                const tube = document.createElement('span');
-                tube.textContent = 'Tube';
-                tube.style.cssText = 'color:#fff;background:#cc0000;border-radius:4px;padding:2px 6px;margin-left:1px;';
-                logo.appendChild(you);
-                logo.appendChild(tube);
-            }
-
-            logoLink.appendChild(logo);
-        }
-
         // --- Channel page replacement ---
 
         async _tryReplaceChannelPage() {
@@ -3012,55 +2960,21 @@
     }
 
     // =========================================================================
-    // 7. THEME ENGINE  –  2011 vintage flat CSS
+    // 7. THEME ENGINE  –  V3 (VORAPIS) CSS + script component styles
     // =========================================================================
 
     class ThemeEngine {
         static inject() {
+            // Load V3 (VORAPIS) theme CSS
+            try {
+                const v3css = GM_getResourceText('v3css');
+                if (v3css) GM_addStyle(v3css);
+            } catch (e) {
+                console.warn('[iw2gb] Failed to load V3 CSS:', e);
+            }
+
+            // Script component styles only (panel, cards, sidebar, endscreen, etc.)
             GM_addStyle(`
-                /* === iwant2gob4ck 2011 Flat Theme === */
-
-                /* Global overrides — square corners, no shadows, no animations */
-                ytd-app,
-                ytd-browse,
-                ytd-watch-flexy,
-                ytd-masthead,
-                ytd-mini-guide-renderer,
-                ytd-guide-renderer,
-                #content,
-                #page-manager {
-                    border-radius: 0 !important;
-                }
-
-                /* Kill rounded corners on thumbnails */
-                ytd-thumbnail,
-                ytd-thumbnail img,
-                yt-image,
-                yt-img-shadow,
-                yt-img-shadow img,
-                .yt-core-image,
-                ytd-rich-item-renderer,
-                ytd-compact-video-renderer,
-                ytd-video-renderer {
-                    border-radius: 0 !important;
-                }
-
-                /* Kill shadows */
-                ytd-masthead,
-                #masthead-container,
-                ytd-searchbox,
-                tp-yt-paper-dialog,
-                ytd-popup-container {
-                    box-shadow: none !important;
-                }
-
-                /* Kill animations/transitions on common elements */
-                ytd-thumbnail,
-                ytd-rich-item-renderer,
-                yt-img-shadow {
-                    transition: none !important;
-                }
-
                 /* Hide Shorts shelf & tabs everywhere */
                 ytd-reel-shelf-renderer,
                 ytd-rich-shelf-renderer[is-shorts],
@@ -3084,7 +2998,7 @@
                     display: none !important;
                 }
 
-                /* === iwant2gob4ck Custom Components (2009 YouTube style) === */
+                /* === iwant2gob4ck Custom Components === */
 
                 /* Homepage / channel grid — span full width of YouTube's grid */
                 .wbt-container,
@@ -3156,7 +3070,6 @@
                     padding: 8px 0;
                 }
 
-                /* 2009 blue link titles */
                 .wbt-card-title {
                     font-size: 14px;
                     font-weight: bold;
@@ -3673,304 +3586,6 @@
                 .wbt-toast.success { background: #2e7d32; }
                 .wbt-toast.error   { background: #c62828; }
 
-                /* === 2009 Visual Overhaul === */
-
-                /* Hide modern masthead clutter */
-                #voice-search-button,
-                ytd-topbar-menu-button-renderer:has(button[aria-label="Create"]),
-                ytd-topbar-menu-button-renderer:has(button[aria-label*="Gemini"]),
-                ytd-topbar-menu-button-renderer:has(button[aria-label*="gemini"]),
-                ytd-topbar-menu-button-renderer:has(button[aria-label*="AI"]),
-                ytd-topbar-menu-button-renderer:has([class*="gemini"]),
-                ytd-topbar-menu-button-renderer:has([class*="Gemini"]),
-                ytd-topbar-menu-button-renderer:has(yt-icon[icon="youtube_gemini_sparkle"]),
-                ytd-topbar-menu-button-renderer:has(path[d*="M12 2C6.48"]),
-                tp-yt-iron-icon[icon="youtube_gemini_sparkle"],
-                [class*="gemini-promo"],
-                [class*="gemini-entry"],
-                ytd-notification-topbar-button-renderer,
-                ytd-topbar-logo-renderer #country-code,
-                ytd-topbar-menu-button-renderer:has(a[href*="premium"]) {
-                    display: none !important;
-                }
-
-                /* Classic "YouTube" logo */
-                ytd-topbar-logo-renderer a#logo yt-icon,
-                ytd-topbar-logo-renderer a#logo svg {
-                    display: none !important;
-                }
-                ytd-topbar-logo-renderer a#logo {
-                    display: flex !important;
-                    align-items: center;
-                    text-decoration: none !important;
-                    font-family: Arial, Helvetica, sans-serif;
-                    font-size: 20px;
-                    font-weight: bold;
-                    line-height: 1;
-                }
-                ytd-topbar-logo-renderer a#logo::before {
-                    content: 'You';
-                    color: #000;
-                    font-size: 20px;
-                    font-weight: bold;
-                }
-                html[dark] ytd-topbar-logo-renderer a#logo::before {
-                    color: #fff;
-                }
-                ytd-topbar-logo-renderer a#logo::after {
-                    content: 'Tube';
-                    color: #fff;
-                    background: #cc0000;
-                    border-radius: 4px;
-                    padding: 2px 6px;
-                    font-size: 20px;
-                    font-weight: bold;
-                    margin-left: 1px;
-                }
-                /* JS fallback logo styling */
-                .wbt-logo-you {
-                    color: #000;
-                }
-                html[dark] .wbt-logo-you {
-                    color: #fff;
-                }
-                /* Hide pseudo-elements when custom logo is uploaded */
-                ytd-topbar-logo-renderer a#logo.wbt-has-custom-logo::before,
-                ytd-topbar-logo-renderer a#logo.wbt-has-custom-logo::after {
-                    display: none !important;
-                }
-
-                /* 2009 rectangular search bar */
-                ytd-searchbox,
-                ytd-searchbox #container {
-                    border-radius: 0 !important;
-                    border: 1px solid #999 !important;
-                    background: #fff !important;
-                    box-shadow: none !important;
-                }
-                ytd-searchbox #container.ytd-searchbox {
-                    border-radius: 0 !important;
-                    padding: 0 !important;
-                    margin: 0 !important;
-                }
-                input#search {
-                    background: #fff !important;
-                    border: none !important;
-                    border-radius: 0 !important;
-                    box-shadow: none !important;
-                }
-                html[dark] ytd-searchbox,
-                html[dark] ytd-searchbox #container {
-                    background: #222 !important;
-                    border-color: #555 !important;
-                }
-                html[dark] input#search {
-                    background: #222 !important;
-                    color: #fff !important;
-                }
-                #search-icon-legacy {
-                    background: #f0f0f0 !important;
-                    border-left: 1px solid #999 !important;
-                    border-radius: 0 !important;
-                }
-                html[dark] #search-icon-legacy {
-                    background: #333 !important;
-                    border-left-color: #555 !important;
-                }
-                ytd-searchbox[has-focus] #container,
-                ytd-searchbox[focused] #container {
-                    box-shadow: none !important;
-                    border-color: #999 !important;
-                }
-                html[dark] ytd-searchbox[has-focus] #container,
-                html[dark] ytd-searchbox[focused] #container {
-                    border-color: #555 !important;
-                }
-
-                /* 2009 masthead/header */
-                ytd-masthead {
-                    background: #fff !important;
-                    border-bottom: 1px solid #ccc !important;
-                    box-shadow: none !important;
-                }
-                #masthead-container {
-                    background: #fff !important;
-                }
-                ytd-app,
-                ytd-browse,
-                #content,
-                #page-manager,
-                ytd-two-column-browse-results-renderer {
-                    background: #f2f2f2 !important;
-                }
-                html[dark] ytd-masthead {
-                    background: #1a1a1a !important;
-                    border-bottom-color: #333 !important;
-                }
-                html[dark] #masthead-container {
-                    background: #1a1a1a !important;
-                }
-                html[dark] ytd-app,
-                html[dark] ytd-browse,
-                html[dark] #content,
-                html[dark] #page-manager,
-                html[dark] ytd-two-column-browse-results-renderer {
-                    background: #111 !important;
-                }
-
-                /* 2009 sidebar navigation */
-                ytd-guide-renderer {
-                    background: #f2f2f2 !important;
-                    border-right: 1px solid #ccc !important;
-                }
-                html[dark] ytd-guide-renderer {
-                    background: #1a1a1a !important;
-                    border-right-color: #333 !important;
-                }
-                ytd-guide-entry-renderer {
-                    border-radius: 0 !important;
-                }
-                ytd-guide-entry-renderer tp-yt-paper-item,
-                ytd-guide-entry-renderer a.yt-simple-endpoint {
-                    border-radius: 0 !important;
-                    height: 32px !important;
-                    padding: 0 12px !important;
-                }
-                ytd-guide-entry-renderer yt-icon,
-                ytd-guide-entry-renderer .guide-icon {
-                    width: 18px !important;
-                    height: 18px !important;
-                }
-                ytd-guide-entry-renderer[active] tp-yt-paper-item,
-                ytd-guide-entry-renderer[active] a.yt-simple-endpoint,
-                ytd-guide-entry-renderer tp-yt-paper-item:hover,
-                ytd-guide-entry-renderer a.yt-simple-endpoint:hover {
-                    background: #e0e0e0 !important;
-                    border-radius: 0 !important;
-                }
-                html[dark] ytd-guide-entry-renderer[active] tp-yt-paper-item,
-                html[dark] ytd-guide-entry-renderer[active] a.yt-simple-endpoint,
-                html[dark] ytd-guide-entry-renderer tp-yt-paper-item:hover,
-                html[dark] ytd-guide-entry-renderer a.yt-simple-endpoint:hover {
-                    background: #333 !important;
-                }
-                ytd-guide-section-renderer #guide-section-title {
-                    text-transform: uppercase !important;
-                    font-size: 10px !important;
-                    letter-spacing: 1px !important;
-                    color: #888 !important;
-                }
-                ytd-mini-guide-renderer {
-                    background: #f2f2f2 !important;
-                }
-                html[dark] ytd-mini-guide-renderer {
-                    background: #1a1a1a !important;
-                }
-                ytd-mini-guide-entry-renderer {
-                    border-radius: 0 !important;
-                }
-                ytd-mini-guide-entry-renderer yt-icon {
-                    width: 18px !important;
-                    height: 18px !important;
-                }
-                #guide-renderer #footer,
-                ytd-guide-renderer #footer {
-                    display: none !important;
-                }
-
-                /* === Video page: flatten like/dislike/subscribe/share === */
-
-                /* Kill all rounded buttons on watch page */
-                yt-button-shape button,
-                yt-button-shape a,
-                ytd-button-renderer button,
-                ytd-button-renderer a,
-                ytd-toggle-button-renderer button,
-                ytd-subscribe-button-renderer button,
-                #subscribe-button button,
-                #subscribe-button yt-button-shape button,
-                .yt-spec-button-shape-next,
-                tp-yt-paper-button {
-                    border-radius: 0 !important;
-                }
-
-                /* Like/dislike segmented button */
-                ytd-segmented-like-dislike-button-renderer,
-                like-button-view-model,
-                dislike-button-view-model,
-                .YtLikeButtonViewModelHost,
-                .YtDislikeButtonViewModelHost {
-                    border-radius: 0 !important;
-                }
-                ytd-segmented-like-dislike-button-renderer .yt-spec-button-shape-next,
-                like-button-view-model .yt-spec-button-shape-next,
-                dislike-button-view-model .yt-spec-button-shape-next {
-                    border-radius: 0 !important;
-                }
-
-                /* Subscribe button flat */
-                ytd-subscribe-button-renderer,
-                yt-subscribe-button-view-model,
-                .yt-spec-button-shape-next--filled {
-                    border-radius: 0 !important;
-                }
-
-                /* Share, clip, save, thanks buttons */
-                ytd-menu-renderer yt-button-shape,
-                #top-level-buttons-computed yt-button-shape,
-                #flexible-item-buttons yt-button-shape {
-                    border-radius: 0 !important;
-                }
-                ytd-menu-renderer yt-button-shape button,
-                #top-level-buttons-computed yt-button-shape button,
-                #flexible-item-buttons yt-button-shape button {
-                    border-radius: 0 !important;
-                }
-
-                /* Description box */
-                ytd-text-inline-expander,
-                #description-inner,
-                ytd-watch-metadata #description,
-                #above-the-fold #description,
-                tp-yt-paper-dialog {
-                    border-radius: 0 !important;
-                }
-
-                /* Comment input and chips */
-                #comment-dialog tp-yt-paper-input-container,
-                #contenteditable-root,
-                #simplebox-placeholder,
-                ytd-comments-header-renderer #sort-menu yt-sort-filter-sub-menu-renderer,
-                ytd-comment-simplebox-renderer {
-                    border-radius: 0 !important;
-                }
-
-                /* Channel avatar — square */
-                #owner #avatar img,
-                #owner yt-img-shadow,
-                ytd-video-owner-renderer #avatar img,
-                ytd-video-owner-renderer yt-img-shadow {
-                    border-radius: 0 !important;
-                }
-
-                /* Chips/pills on watch page */
-                yt-chip-cloud-chip-renderer,
-                ytd-search-filter-renderer {
-                    border-radius: 0 !important;
-                }
-
-                /* Kill Gemini on video page */
-                ytd-watch-metadata [class*="gemini"],
-                ytd-watch-flexy [class*="gemini"],
-                #cinematics,
-                [class*="sparkle"],
-                ytd-menu-renderer ytd-button-renderer:has([aria-label*="Gemini"]),
-                ytd-menu-renderer ytd-button-renderer:has([aria-label*="gemini"]),
-                ytd-menu-renderer yt-button-shape:has([aria-label*="Gemini"]),
-                ytd-menu-renderer yt-button-shape:has([aria-label*="gemini"]) {
-                    display: none !important;
-                }
-
                 /* Profile buttons */
                 .wbt-profile-actions {
                     margin-bottom: 8px;
@@ -4040,24 +3655,6 @@
                 .wbt-fab:hover {
                     background: #aa0000;
                     width: 20px;
-                }
-
-                /* Logo upload section */
-                .wbt-logo-preview {
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    margin-bottom: 8px;
-                }
-                .wbt-logo-preview img {
-                    max-height: 24px;
-                    max-width: 120px;
-                    object-fit: contain;
-                    background: repeating-conic-gradient(#808080 0% 25%, transparent 0% 50%) 50% / 8px 8px;
-                }
-                .wbt-logo-actions {
-                    display: flex;
-                    gap: 4px;
                 }
 
                 /* === WBT Endscreen Overlay === */
@@ -4314,38 +3911,6 @@
 
             body.appendChild(this._buildSection('Date', 'date', true, [dateInput, presets, clockRow]));
 
-            // --- Logo section ---
-            const logoContainer = _el('div', null);
-            const logoPreview = _el('div', 'wbt-logo-preview');
-            logoPreview.id = 'wbt-logo-preview';
-            const currentLogo = Store.getCustomLogo();
-            if (currentLogo) {
-                const prevImg = document.createElement('img');
-                prevImg.src = currentLogo;
-                logoPreview.appendChild(prevImg);
-            } else {
-                logoPreview.appendChild(_el('span', null, 'Default (YouΤube text)'));
-                logoPreview.style.cssText = 'color:#666;font-size:11px;';
-            }
-            logoContainer.appendChild(logoPreview);
-
-            const logoActions = _el('div', 'wbt-logo-actions');
-            const logoFileInput = document.createElement('input');
-            logoFileInput.type = 'file';
-            logoFileInput.accept = 'image/png,image/gif,image/webp,image/svg+xml';
-            logoFileInput.id = 'wbt-logo-file';
-            logoFileInput.style.display = 'none';
-            const uploadBtn = _el('button', 'wbt-preset-btn', 'Upload PNG');
-            uploadBtn.id = 'wbt-logo-upload';
-            const clearBtn = _el('button', 'wbt-preset-btn', 'Clear');
-            clearBtn.id = 'wbt-logo-clear';
-            logoActions.appendChild(logoFileInput);
-            logoActions.appendChild(uploadBtn);
-            logoActions.appendChild(clearBtn);
-            logoContainer.appendChild(logoActions);
-
-            body.appendChild(this._buildSection('Logo', 'logo', false, [logoContainer]));
-
             // --- Subscriptions section ---
             const subInput = document.createElement('input');
             subInput.className = 'wbt-add-input';
@@ -4532,34 +4097,6 @@
                 this.panel.style.display = 'none';
                 const fab = document.getElementById('wbt-fab');
                 if (fab) fab.style.display = 'flex';
-            });
-
-            // Logo upload
-            this.panel.querySelector('#wbt-logo-upload').addEventListener('click', () => {
-                this.panel.querySelector('#wbt-logo-file').click();
-            });
-            this.panel.querySelector('#wbt-logo-file').addEventListener('change', (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = () => {
-                    Store.setCustomLogo(reader.result);
-                    // Remove existing logo so it rebuilds
-                    const existing = document.querySelector('.wbt-retro-logo');
-                    if (existing) existing.remove();
-                    this._refreshLogoPreview();
-                    this._toast('Logo updated', 'success');
-                };
-                reader.readAsDataURL(file);
-            });
-            this.panel.querySelector('#wbt-logo-clear').addEventListener('click', () => {
-                Store.clearCustomLogo();
-                const existing = document.querySelector('.wbt-retro-logo');
-                if (existing) existing.remove();
-                const logoLink = document.querySelector('ytd-topbar-logo-renderer a#logo');
-                if (logoLink) logoLink.classList.remove('wbt-has-custom-logo');
-                this._refreshLogoPreview();
-                this._toast('Logo reset to default', 'success');
             });
 
             // Section toggles
@@ -5156,9 +4693,6 @@
                     Store.loadProfile(name);
                     this.panel.querySelector('#wbt-date').value = Store.getDate() || '';
                     this._refreshAllLists();
-                    this._refreshLogoPreview();
-                    const existing = document.querySelector('.wbt-retro-logo');
-                    if (existing) existing.remove();
                     this.dom.forceReload();
                     this._toast(`Loaded "${name}"`, 'success');
                 });
@@ -5261,24 +4795,6 @@
                     _el('span', 'wbt-stat-value', value),
                 ]);
                 grid.appendChild(row);
-            }
-        }
-
-        // --- Logo preview ---
-
-        _refreshLogoPreview() {
-            const preview = this.panel.querySelector('#wbt-logo-preview');
-            if (!preview) return;
-            _clear(preview);
-            const currentLogo = Store.getCustomLogo();
-            if (currentLogo) {
-                const img = document.createElement('img');
-                img.src = currentLogo;
-                preview.appendChild(img);
-                preview.style.cssText = '';
-            } else {
-                preview.appendChild(_el('span', null, 'Default (YouTube text)'));
-                preview.style.cssText = 'color:#666;font-size:11px;';
             }
         }
 
