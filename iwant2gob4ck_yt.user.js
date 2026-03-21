@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      145
+// @version      146
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics feed a vintage 2011-themed experience.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -2875,12 +2875,6 @@
             for (const comment of comments) {
                 comment.setAttribute('data-wbt-comment-checked', '1');
 
-                // Always show your own comments regardless of date filter
-                // (the badge element exists on every comment but is only visible on yours)
-                const badge = comment.querySelector('#author-comment-badge, ytd-author-comment-badge-renderer');
-                if (badge && badge.offsetHeight > 0 && badge.children.length > 0) {
-                    continue;
-                }
 
                 // Try specific selectors first, then fall back to finding any element with date text
                 let timeEl = comment.querySelector(
