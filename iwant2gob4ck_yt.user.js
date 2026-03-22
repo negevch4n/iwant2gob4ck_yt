@@ -2,7 +2,7 @@
 // @name         iwant2gob4ck - YouTube Time Machine
 // @namespace    http://tampermonkey.net/
 // @license      MIT
-// @version      151
+// @version      152
 // @description  YouTube time machine. Pick a date, see videos from that era. Subscriptions, search terms, categories, and custom topics. Compatible with VORAPIS & StarTube.
 // @author       You
 // @match        https://www.youtube.com/*
@@ -1827,93 +1827,161 @@
         while (el.firstChild) el.removeChild(el.firstChild);
     }
 
+    // -------------------------------------------------------------------------
+    // VideoSwapper — finds existing video elements and swaps their data in-place
+    // -------------------------------------------------------------------------
+
+    class VideoSwapper {
+        // Selector maps per frontend
+        static _SELECTORS = {
+            vanilla: {
+                feed: {
+                    container: 'ytd-rich-item-renderer:not([data-wbt-swapped]):not([data-wbt-hidden])',
+                    thumbnailImg: '#thumbnail img, ytd-thumbnail img',
+                    title: '#video-title, a#video-title-link',
+                    channel: 'ytd-channel-name #text, ytd-channel-name yt-formatted-string',
+                    metadata: '#metadata-line span, #metadata-line .inline-metadata-item',
+                    watchLinks: 'a[href*="/watch?v="]',
+                },
+                sidebar: {
+                    container: 'ytd-compact-video-renderer:not([data-wbt-swapped]):not([data-wbt-hidden])',
+                    thumbnailImg: '#thumbnail img, ytd-thumbnail img',
+                    title: '#video-title, span#video-title',
+                    channel: 'ytd-channel-name #text, ytd-channel-name yt-formatted-string',
+                    metadata: '#metadata-line span, .ytd-video-meta-block span',
+                    watchLinks: 'a[href*="/watch?v="]',
+                },
+            },
+            vorapis: {
+                feed: {
+                    container: '.yt-lockup:not([data-wbt-swapped]), .yt-lockup-tile:not([data-wbt-swapped]), .feed-item-container:not([data-wbt-swapped])',
+                    thumbnailImg: '.yt-lockup-thumbnail img, .video-thumb img',
+                    title: '.yt-lockup-title a',
+                    channel: '.yt-lockup-byline a',
+                    metadata: '.yt-lockup-meta-info li',
+                    watchLinks: 'a[href*="/watch?v="]',
+                },
+                sidebar: {
+                    container: '.video-list-item:not([data-wbt-swapped]), .watch-sidebar-body .yt-lockup:not([data-wbt-swapped])',
+                    thumbnailImg: '.yt-lockup-thumbnail img, .video-thumb img',
+                    title: '.yt-lockup-title a',
+                    channel: '.yt-lockup-byline a',
+                    metadata: '.yt-lockup-meta-info li',
+                    watchLinks: 'a[href*="/watch?v="]',
+                },
+            },
+        };
+
+        static _getSelectors(context) {
+            const frontend = FrontendDetector.detect();
+            const map = this._SELECTORS[frontend] || this._SELECTORS.vanilla;
+            return map[context] || map.feed;
+        }
+
+        /**
+         * Find un-swapped video slot elements on the page.
+         * @param {'feed'|'sidebar'|'channel'} context
+         * @returns {Element[]}
+         */
+        static findSlots(context) {
+            const ctx = context === 'channel' ? 'feed' : context; // channel uses same renderers as feed
+            const sel = this._getSelectors(ctx);
+            let slots = [...document.querySelectorAll(sel.container)];
+
+            // Filter out hidden / zero-size elements and Shorts links
+            slots = slots.filter(el => {
+                if (el.offsetHeight === 0) return false;
+                // Skip Shorts
+                const link = el.querySelector('a[href*="/shorts/"]');
+                if (link) return false;
+                return true;
+            });
+
+            if (slots.length > 0) return slots;
+
+            // Fallback: generic approach — walk up from watch links
+            const allLinks = document.querySelectorAll('a[href*="/watch?v="]:not([data-wbt-swapped-link])');
+            const seen = new Set();
+            for (const link of allLinks) {
+                // Walk up to find a reasonable container (has both link + image)
+                let ancestor = link.parentElement;
+                for (let i = 0; i < 8 && ancestor; i++) {
+                    if (ancestor.querySelector('img') && !ancestor.dataset.wbtSwapped && !seen.has(ancestor)) {
+                        // Don't pick the whole page or a massive container
+                        if (ancestor.children.length < 20) {
+                            seen.add(ancestor);
+                            break;
+                        }
+                    }
+                    ancestor = ancestor.parentElement;
+                }
+            }
+            return [...seen];
+        }
+
+        /**
+         * Swap a video element's data in-place.
+         * @param {Element} element - The video container element
+         * @param {Object} video - The time-machine video data
+         * @param {string} dateStr - The set date string
+         */
+        static swap(element, video, dateStr) {
+            const frontend = FrontendDetector.detect();
+            const ctx = element.closest('ytd-compact-video-renderer, .video-list-item, .watch-sidebar-body') ? 'sidebar' : 'feed';
+            const sel = this._getSelectors(ctx);
+
+            // 1. Thumbnail
+            const img = element.querySelector(sel.thumbnailImg);
+            if (img) {
+                img.src = video.thumbnail;
+                if (img.srcset) img.removeAttribute('srcset');
+            }
+
+            // 2. Title
+            const titleEl = element.querySelector(sel.title);
+            if (titleEl) {
+                titleEl.textContent = video.title;
+                titleEl.title = video.title;
+                if (titleEl.getAttribute('aria-label')) {
+                    titleEl.setAttribute('aria-label', video.title);
+                }
+            }
+
+            // 3. All watch links — replace the video ID
+            const links = element.querySelectorAll(sel.watchLinks);
+            for (const link of links) {
+                const url = new URL(link.href, location.origin);
+                url.searchParams.set('v', video.id);
+                link.href = url.pathname + url.search;
+            }
+
+            // 4. Channel name
+            const channelEl = element.querySelector(sel.channel);
+            if (channelEl) {
+                channelEl.textContent = video.channel;
+            }
+
+            // 5. Metadata (view count + date)
+            const metaEls = element.querySelectorAll(sel.metadata);
+            if (metaEls.length >= 1) {
+                metaEls[0].textContent = video.viewCountFormatted;
+            }
+            if (metaEls.length >= 2) {
+                metaEls[1].textContent = DateHelper.recalcForFeed(video.relativeDate, dateStr, video.id);
+            }
+
+            // 6. Mark as swapped
+            element.dataset.wbtSwapped = video.id;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // VideoRenderer — only used for endscreen overlay cards
+    // -------------------------------------------------------------------------
+
     class VideoRenderer {
-        static homepageCard(video) {
-            const card = _el('div', 'wbt-card');
-            card.dataset.videoId = video.id;
-
-            const link = _el('a', 'wbt-card-link');
-            link.href = `/watch?v=${video.id}`;
-
-            const thumbWrap = _el('div', 'wbt-thumb-wrap');
-            const img = document.createElement('img');
-            img.className = 'wbt-thumb';
-            img.src = video.thumbnail;
-            img.alt = '';
-            img.loading = 'lazy';
-            thumbWrap.appendChild(img);
-
-            const dateSpan = _el('span', 'wbt-card-date', DateHelper.recalcForFeed(video.relativeDate, Store.getCurrentDate(), video.id));
-            const info = _el('div', 'wbt-card-info', [
-                _el('div', 'wbt-card-title', video.title),
-                _el('div', 'wbt-card-channel', video.channel),
-                _el('div', 'wbt-card-meta', [
-                    _el('span', null, video.viewCountFormatted),
-                    _el('span', 'wbt-dot', '\u00B7'),
-                    dateSpan,
-                ]),
-            ]);
-
-            link.appendChild(thumbWrap);
-            link.appendChild(info);
-            card.appendChild(link);
-            return card;
-        }
-
-        static sidebarCard(video) {
-            const card = _el('div', 'wbt-sidebar-card');
-
-            const link = _el('a', 'wbt-sidebar-link');
-            link.href = `/watch?v=${video.id}`;
-
-            const thumbWrap = _el('div', 'wbt-sidebar-thumb-wrap');
-            const img = document.createElement('img');
-            img.className = 'wbt-sidebar-thumb';
-            img.src = video.thumbnail;
-            img.alt = '';
-            img.loading = 'lazy';
-            thumbWrap.appendChild(img);
-
-            const info = _el('div', 'wbt-sidebar-info', [
-                _el('div', 'wbt-sidebar-title', video.title),
-                _el('div', 'wbt-sidebar-channel', video.channel),
-                _el('div', 'wbt-sidebar-meta', `${video.viewCountFormatted} \u00B7 ${DateHelper.recalcForFeed(video.relativeDate, Store.getCurrentDate(), video.id)}`),
-            ]);
-
-            link.appendChild(thumbWrap);
-            link.appendChild(info);
-            card.appendChild(link);
-            return card;
-        }
-
         static loadingIndicator() {
             return _el('div', 'wbt-loading', 'Loading...');
-        }
-
-        static noVideosMessage() {
-            return _el('div', 'wbt-empty', [
-                _el('h3', null, 'No videos found'),
-                _el('p', null, 'Try selecting a different date or adjusting your preferences.'),
-            ]);
-        }
-
-        static errorMessage(msg) {
-            return _el('div', 'wbt-empty', [
-                _el('h3', null, 'Something went wrong'),
-                _el('p', null, msg),
-            ]);
-        }
-
-        static loadMoreButton(onClick) {
-            const btn = _el('button', 'wbt-load-more', 'Load More');
-            btn.addEventListener('click', onClick);
-            return btn;
-        }
-
-        static refreshButton(onClick) {
-            const btn = _el('button', 'wbt-refresh-btn', 'New Videos');
-            btn.addEventListener('click', onClick);
-            return btn;
         }
 
         static endscreenCard(video) {
@@ -1949,16 +2017,19 @@
     class DOMController {
         constructor(feedEngine) {
             this.feedEngine = feedEngine;
-            this.allVideos = [];
-            this.displayedIndex = 0;
-            this._homepageReplaced = false;
-            this._homepageLoading = false;
-            this._sidebarReplaced = false;
-            this._sidebarLoading = false;
-            this._channelReplaced = false;
-            this._channelLoading = false;
+            // Video queues for in-place swapping
+            this._feedQueue = [];
+            this._sidebarQueue = [];
+            this._channelQueue = [];
+            this._feedFetching = false;
+            this._sidebarFetching = false;
+            this._channelFetching = false;
+            this._feedPage = 0;
+            this._swapMap = new Map(); // videoId → video object (for re-swapping stale elements)
+            // Endscreen (still uses custom overlay)
             this._endscreenReplaced = false;
             this._endscreenLoading = false;
+            // Navigation & misc
             this._lastUrl = '';
             this._nukeInterval = null;
             this._observer = null;
@@ -1970,6 +2041,7 @@
         init() {
             this._startNavDetection();
             this._startNuking();
+            this._installClickInterceptor();
             this._onNavChange();
         }
 
@@ -2001,12 +2073,16 @@
         _onNavChange() {
             FrontendDetector.reset();
             this._lastUrl = location.href;
-            this._homepageReplaced = false;
-            this._homepageLoading = false;
-            this._sidebarReplaced = false;
-            this._sidebarLoading = false;
-            this._channelReplaced = false;
-            this._channelLoading = false;
+            // Reset swap queues
+            this._feedQueue = [];
+            this._sidebarQueue = [];
+            this._channelQueue = [];
+            this._feedFetching = false;
+            this._sidebarFetching = false;
+            this._channelFetching = false;
+            this._feedPage = 0;
+            this._swapMap.clear();
+            // Reset endscreen
             this._endscreenReplaced = false;
             this._endscreenLoading = false;
             this._pendingSearchClean = null;
@@ -2025,25 +2101,19 @@
                 this._interceptSearch();
             }
 
-            if (this._isHomePage() || this._isSubscriptionsPage()) {
-                this._tryReplaceHomepage();
-            } else if (this._isVideoPage()) {
-                this._tryReplaceSidebar();
-                // Start watch tracking
+            // Start watch tracking on video pages
+            if (this._isVideoPage()) {
                 if (Store.isLearningEnabled()) {
                     const videoId = new URLSearchParams(location.search).get('v');
                     if (videoId && this._videoMetaMap.has(videoId)) {
                         this._pendingWatch = { videoId, meta: this._videoMetaMap.get(videoId), startedAt: Date.now() };
                     } else if (videoId) {
-                        // Video not in meta map (e.g. from search, channel page, direct link).
-                        // Fetch its details so we can still track the watch.
                         this._pendingWatch = null;
                         this.feedEngine.api.getVideoDetails([videoId]).then(details => {
                             if (details.length && this._isVideoPage()) {
                                 const d = details[0];
                                 const meta = { channel: d.channel || '', channelId: d.channelId || '', title: d.title || '' };
                                 this._videoMetaMap.set(videoId, meta);
-                                // Only set pending if we're still on this video page
                                 const currentId = new URLSearchParams(location.search).get('v');
                                 if (currentId === videoId) {
                                     this._pendingWatch = { videoId, meta, startedAt: Date.now() };
@@ -2055,8 +2125,6 @@
                         this._pendingWatch = null;
                     }
                 }
-            } else if (this._isChannelPage()) {
-                this._tryReplaceChannelPage();
             }
         }
 
@@ -2083,53 +2151,11 @@
 
         // --- Frontend-aware selector helpers ---
 
-        _getHomepageGrid() {
-            if (FrontendDetector.isVorapis()) {
-                return document.querySelector(
-                    '.distiller_streamcontent,' +
-                    '#content'
-                );
-            }
-            return document.querySelector(
-                'ytd-browse[page-subtype="home"] ytd-rich-grid-renderer #contents,' +
-                'ytd-browse[page-subtype="subscriptions"] ytd-rich-grid-renderer #contents,' +
-                'ytd-browse[page-subtype="subscriptions"] #contents'
-            );
-        }
-
-        _getSidebarContainer() {
-            if (FrontendDetector.isVorapis()) {
-                return document.querySelector(
-                    '.distiller_yt-sb,' +
-                    '#watch7-sidebar,' +
-                    '#secondary'
-                );
-            }
-            return document.querySelector('#secondary #related, #secondary-inner #related');
-        }
-
         _getPlayerContainer() {
             return document.querySelector(
                 '#movie_player,' +
                 '.html5-video-player,' +
                 '#player-api_VORAPI_ELEMENT_ID'
-            );
-        }
-
-        _getChannelGrid() {
-            if (FrontendDetector.isVorapis()) {
-                return document.querySelector(
-                    '.distiller_streamcontent,' +
-                    '#browse-items-primary'
-                );
-            }
-            return document.querySelector(
-                'ytd-browse[page-subtype="channels"] ytd-rich-grid-renderer #contents,' +
-                'ytd-browse[page-subtype="channels"] ytd-section-list-renderer #contents,' +
-                'ytd-browse[page-subtype="channels"] #contents.ytd-rich-grid-renderer,' +
-                'ytd-browse[page-subtype="channel"] ytd-rich-grid-renderer #contents,' +
-                'ytd-browse[page-subtype="channel"] ytd-section-list-renderer #contents,' +
-                'ytd-browse[page-subtype="channel"] #contents.ytd-rich-grid-renderer'
             );
         }
 
@@ -2152,19 +2178,6 @@
             return el?.textContent?.trim() || null;
         }
 
-        _hideOriginalSidebar(sidebar) {
-            if (FrontendDetector.isVorapis()) {
-                for (const child of sidebar.children) {
-                    if (!child.classList.contains('wbt-sidebar-container')) {
-                        child.style.display = 'none';
-                    }
-                }
-            } else {
-                const original = sidebar.querySelector('#items, ytd-watch-next-secondary-results-renderer');
-                if (original) original.style.display = 'none';
-            }
-        }
-
         // --- Continuous nuking of Shorts, chips, etc. ---
 
         _startNuking() {
@@ -2183,26 +2196,16 @@
                     }
                 }
 
-                // Continuously hide original homepage/subscriptions content
+                // In-place video swapping (replaces old hide-and-replace approach)
                 if (this._isHomePage() || this._isSubscriptionsPage()) {
-                    this._hideOriginalFeed();
-                    if (this._homepageReplaced && !document.querySelector('.wbt-container')) {
-                        this._homepageReplaced = false;
-                        this._homepageLoading = false;
-                    }
-                    if (!this._homepageReplaced && !this._homepageLoading) this._tryReplaceHomepage();
+                    this._swapFeedVideos();
                 }
                 if (this._isVideoPage()) {
-                    if (this._sidebarReplaced && !document.querySelector('.wbt-sidebar-container')) {
-                        this._sidebarReplaced = false;
-                        this._sidebarLoading = false;
-                    }
-                    if (!this._sidebarReplaced && !this._sidebarLoading) this._tryReplaceSidebar();
+                    this._swapSidebarVideos();
                     this._filterComments();
                     this._hidePlayerOverlays();
 
                     // Commit watch after sufficient time on video page
-                    // Threshold scales with video duration: 50% of length, clamped 5s–30s
                     if (this._pendingWatch) {
                         const videoEl = document.querySelector('video.html5-main-video, video');
                         const dur = videoEl && videoEl.duration && isFinite(videoEl.duration) ? videoEl.duration : 0;
@@ -2222,14 +2225,13 @@
                         this._pendingWatch = null;
                     }
 
-                    // Endscreen: show WBT grid when video ends
+                    // Endscreen: show overlay when video ends
                     const video = document.querySelector('video.html5-main-video, video');
                     if (video && video.ended) {
                         if (!this._endscreenReplaced && !this._endscreenLoading) {
                             this._tryReplaceEndscreen();
                         }
                     } else {
-                        // Video still playing or navigated — remove any endscreen overlay
                         if (this._endscreenReplaced) {
                             const es = document.querySelector('.wbt-endscreen-container');
                             if (es) es.remove();
@@ -2238,12 +2240,11 @@
                     }
                 }
                 if (this._isChannelPage()) {
-                    if (this._channelReplaced && !document.querySelector('.wbt-channel-container')) {
-                        this._channelReplaced = false;
-                        this._channelLoading = false;
-                    }
-                    if (!this._channelReplaced && !this._channelLoading) this._tryReplaceChannelPage();
+                    this._swapChannelVideos();
                 }
+
+                // Re-swap elements that YouTube's Polymer may have overwritten
+                this._reSwapStaleElements();
             }, CONFIG.ui.updateInterval);
         }
 
@@ -2309,227 +2310,191 @@
             }
         }
 
-        _hideOriginalFeed() {
-            if (FrontendDetector.isVorapis()) {
-                const container = document.querySelector('.distiller_streamcontent');
-                if (container) {
-                    for (const child of container.children) {
-                        if (!child.classList.contains('wbt-container') && !child.dataset.wbtHidden) {
-                            child.style.display = 'none';
-                            child.dataset.wbtHidden = '1';
-                        }
-                    }
-                }
-                return;
-            }
-            const selectors = [
-                'ytd-rich-grid-renderer > #contents > ytd-rich-item-renderer',
-                'ytd-rich-grid-renderer > #contents > ytd-rich-section-renderer',
-                'ytd-browse[page-subtype="home"] ytd-rich-grid-renderer > #contents > *:not(.wbt-container)',
-                'ytd-browse[page-subtype="subscriptions"] ytd-rich-grid-renderer > #contents > *:not(.wbt-container)',
-            ];
-            for (const sel of selectors) {
-                for (const el of document.querySelectorAll(sel)) {
-                    if (!el.classList.contains('wbt-container') && !el.dataset.wbtHidden) {
-                        el.style.display = 'none';
-                        el.dataset.wbtHidden = '1';
-                    }
-                }
-            }
-        }
+        // --- In-place video swapping ---
 
-        // --- Homepage replacement ---
-
-        async _tryReplaceHomepage() {
-            if (this._homepageReplaced || this._homepageLoading) return;
-
-            const grid = this._getHomepageGrid();
-            if (!grid) return;
-
-            // Check if we already injected
-            if (grid.querySelector('.wbt-container')) {
-                this._homepageReplaced = true;
-                return;
-            }
-
-            this._homepageLoading = true;
-            this._hideOriginalFeed();
-
-            // Insert our container at the top
-            const container = document.createElement('div');
-            container.className = 'wbt-container';
-            container.appendChild(VideoRenderer.loadingIndicator());
-            grid.insertBefore(container, grid.firstChild);
+        async _swapFeedVideos() {
+            const slots = VideoSwapper.findSlots('feed');
+            if (!slots.length) return;
 
             const dateStr = Store.getCurrentDate();
-            if (!dateStr) {
-                _clear(container);
-                container.appendChild(VideoRenderer.noVideosMessage());
-                this._homepageReplaced = true;
-                this._homepageLoading = false;
-                return;
+            if (!dateStr) return;
+
+            // Pre-fetch if queue is empty
+            if (!this._feedQueue.length && !this._feedFetching) {
+                this._feedFetching = true;
+                try {
+                    this._feedQueue = await this.feedEngine.buildHomeFeed(dateStr);
+                    this._feedPage = 1;
+                } catch (e) {
+                    console.warn('[iw2gb] Feed fetch error:', e.message);
+                } finally {
+                    this._feedFetching = false;
+                }
             }
 
-            try {
-                this.allVideos = await this.feedEngine.buildHomeFeed(dateStr);
+            // Swap each slot from the queue
+            const swapped = [];
+            for (const slot of slots) {
+                if (!this._feedQueue.length) break;
+                const video = this._feedQueue.shift();
+                VideoSwapper.swap(slot, video, dateStr);
+                this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
+                this._swapMap.set(video.id, video);
+                swapped.push(video);
+            }
 
-                // Verify container is still in DOM after async work
-                if (!document.body.contains(container)) {
-                    this._homepageLoading = false;
-                    return; // Will retry on next interval tick
-                }
-
-                _clear(container);
-
-                if (!this.allVideos.length) {
-                    container.appendChild(VideoRenderer.noVideosMessage());
-                    this._homepageReplaced = true;
-                    this._homepageLoading = false;
-                    return;
-                }
-
-                // Toolbar
-                const toolbar = document.createElement('div');
-                toolbar.className = 'wbt-toolbar';
-                toolbar.appendChild(VideoRenderer.refreshButton(() => this._refreshHomepage()));
-                container.appendChild(toolbar);
-
-                // Video grid
-                const videoGrid = document.createElement('div');
-                videoGrid.className = 'wbt-grid';
-                container.appendChild(videoGrid);
-
-                // Render ALL pre-fetched videos immediately (60 cards is nothing)
-                for (const video of this.allVideos) {
-                    videoGrid.appendChild(VideoRenderer.homepageCard(video));
-                }
-
-                // Register video metadata for watch tracking
-                for (const v of this.allVideos) {
-                    this._videoMetaMap.set(v.id, { channel: v.channel, channelId: v.channelId, title: v.title });
-                }
-
-                // "Loading more..." indicator for infinite scroll
-                const loadingMore = document.createElement('div');
-                loadingMore.className = 'wbt-loading-more';
-                loadingMore.textContent = 'Loading more videos...';
-                loadingMore.style.cssText = 'text-align:center;padding:20px;color:var(--wbt-text-secondary);font-size:14px;display:none;';
-                container.appendChild(loadingMore);
-
-                // Infinite scroll: fetch MORE videos from API when user nears bottom
-                const self = this;
-                this._infiniteScrollActive = true;
-                this._infiniteScrollFetching = false;
-                this._infiniteScrollPage = 1;
-
-                const fetchAndAppend = async () => {
-                    if (!self._infiniteScrollActive || self._infiniteScrollFetching) return;
-                    if (!document.body.contains(videoGrid)) { self._infiniteScrollActive = false; return; }
-
-                    self._infiniteScrollFetching = true;
-                    loadingMore.style.display = 'block';
-
-                    try {
-                        const dateStr = Store.getCurrentDate();
-                        if (!dateStr) { self._infiniteScrollFetching = false; return; }
-
-                        self._infiniteScrollPage++;
-                        const existingIds = new Set(self.allVideos.map(v => v.id));
-
-                        // Fetch from a shifted date window so we get genuinely new videos
-                        const fresh = await self.feedEngine.buildHomeFeedMore(dateStr, self._infiniteScrollPage, existingIds);
-                        if (!document.body.contains(videoGrid)) return;
-
-                        if (fresh.length === 0) {
-                            // Try one more page before giving up
-                            self._infiniteScrollPage++;
-                            const retry = await self.feedEngine.buildHomeFeedMore(dateStr, self._infiniteScrollPage, existingIds);
-                            if (retry.length === 0) {
-                                loadingMore.textContent = 'No more videos to load';
-                                loadingMore.style.display = 'block';
-                                self._infiniteScrollActive = false;
-                                return;
-                            }
-                            for (const video of retry) {
-                                videoGrid.appendChild(VideoRenderer.homepageCard(video));
-                                self.allVideos.push(video);
-                                self._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
-                            }
-                            self._enrichCardDates(retry);
-                            Store.addSeenIds(retry.map(v => v.id));
-                            Store.recordImpressions(retry.map(v => v.id));
-                        } else {
-                            for (const video of fresh) {
-                                videoGrid.appendChild(VideoRenderer.homepageCard(video));
-                                self.allVideos.push(video);
-                                self._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
-                            }
-                            self._enrichCardDates(fresh);
-                            Store.addSeenIds(fresh.map(v => v.id));
-                            Store.recordImpressions(fresh.map(v => v.id));
-                        }
-                    } catch (e) {
-                        console.warn('[iw2gb] Infinite scroll fetch error:', e.message);
-                    } finally {
-                        self._infiniteScrollFetching = false;
-                        loadingMore.style.display = 'none';
-                    }
-                };
-
-                // Use IntersectionObserver to detect when the sentinel nears the viewport.
-                // This is far more reliable than scroll math on YouTube's SPA.
-                const sentinel = document.createElement('div');
-                sentinel.className = 'wbt-scroll-sentinel';
-                sentinel.style.cssText = 'height:1px;width:100%;';
-                container.appendChild(sentinel);
-
-                const observer = new IntersectionObserver((entries) => {
-                    if (entries[0].isIntersecting && self._infiniteScrollActive && !self._infiniteScrollFetching) {
-                        fetchAndAppend();
-                    }
-                }, { rootMargin: '1500px' });
-                observer.observe(sentinel);
-
-                // Cleanup observer when grid is removed
-                const cleanupPoll = setInterval(() => {
-                    if (!document.body.contains(videoGrid)) {
-                        observer.disconnect();
-                        clearInterval(cleanupPoll);
-                    }
-                }, 2000);
-
-                this._homepageReplaced = true;
-                this._homepageLoading = false;
+            if (swapped.length) {
+                Store.addSeenIds(swapped.map(v => v.id));
+                Store.recordImpressions(swapped.map(v => v.id));
                 Store.setLastRefresh(Date.now());
+                this._enrichSwappedDates(swapped);
+            }
 
-                // Track displayed video IDs so next refresh shows different ones
-                Store.addSeenIds(this.allVideos.map(v => v.id));
-
-                // Record impressions for overexposure tracking
-                Store.recordImpressions(this.allVideos.map(v => v.id));
-
-                // Progressively fetch real publish dates in the background
-                this._enrichCardDates(this.allVideos);
-            } catch (e) {
-                console.error('[iw2gb] Homepage load error:', e);
-                // Verify container still exists before updating it
-                if (document.body.contains(container)) {
-                    _clear(container);
-                    container.appendChild(VideoRenderer.errorMessage(e.message));
-                }
-                this._homepageLoading = false;
-                // Don't set _homepageReplaced — allow retry
+            // Refill queue if running low
+            if (this._feedQueue.length < 5 && !this._feedFetching && this._feedPage > 0) {
+                this._feedFetching = true;
+                this._feedPage++;
+                const existingIds = new Set([...this._swapMap.keys()]);
+                this.feedEngine.buildHomeFeedMore(dateStr, this._feedPage, existingIds).then(more => {
+                    this._feedQueue.push(...more);
+                }).catch(e => {
+                    console.warn('[iw2gb] Feed refill error:', e.message);
+                }).finally(() => {
+                    this._feedFetching = false;
+                });
             }
         }
 
-        async _refreshHomepage() {
-            this._infiniteScrollActive = false; // stop any running infinite scroll
-            this._homepageReplaced = false;
-            this._homepageLoading = false;
-            const container = document.querySelector('.wbt-container');
-            if (container) container.remove();
+        async _swapSidebarVideos() {
+            const slots = VideoSwapper.findSlots('sidebar');
+            if (!slots.length) return;
 
-            // Clear all caches for this date so we get truly fresh results
+            const dateStr = Store.getCurrentDate();
+            const videoId = new URLSearchParams(location.search).get('v');
+            if (!dateStr || !videoId) return;
+
+            // Pre-fetch if queue is empty
+            if (!this._sidebarQueue.length && !this._sidebarFetching) {
+                this._sidebarFetching = true;
+                try {
+                    this._sidebarQueue = await this.feedEngine.buildRecommendations(videoId, dateStr);
+                } catch (e) {
+                    console.warn('[iw2gb] Sidebar fetch error:', e.message);
+                } finally {
+                    this._sidebarFetching = false;
+                }
+            }
+
+            // Swap each slot
+            const swapped = [];
+            for (const slot of slots) {
+                if (!this._sidebarQueue.length) break;
+                const video = this._sidebarQueue.shift();
+                VideoSwapper.swap(slot, video, dateStr);
+                this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
+                this._swapMap.set(video.id, video);
+                swapped.push(video);
+            }
+
+            if (swapped.length) {
+                Store.recordImpressions(swapped.map(v => v.id));
+            }
+        }
+
+        async _swapChannelVideos() {
+            const slots = VideoSwapper.findSlots('channel');
+            if (!slots.length) return;
+
+            const dateStr = Store.getCurrentDate();
+            if (!dateStr) return;
+
+            // Pre-fetch if queue is empty
+            if (!this._channelQueue.length && !this._channelFetching) {
+                this._channelFetching = true;
+                try {
+                    const channelName = this._getChannelName();
+                    if (!channelName) { this._channelFetching = false; return; }
+
+                    const channelIdMeta = document.querySelector('meta[itemprop="channelId"]')?.content
+                        || document.querySelector('link[rel="canonical"]')?.href?.match(/channel\/(UC[^/]+)/)?.[1]
+                        || '';
+
+                    const q = this.feedEngine.api._buildDateQuery(`"${channelName}"`, null, dateStr);
+                    const body = { query: q, params: 'CAISAhAB' };
+                    const data = await this.feedEngine.api._post('search', body);
+                    let videos = this.feedEngine.api._parseSearchResults(data);
+
+                    if (channelIdMeta) {
+                        const strict = videos.filter(v => v.channelId === channelIdMeta);
+                        if (strict.length > 0) videos = strict;
+                    }
+
+                    this._channelQueue = videos;
+                } catch (e) {
+                    console.warn('[iw2gb] Channel fetch error:', e.message);
+                } finally {
+                    this._channelFetching = false;
+                }
+            }
+
+            // Swap each slot
+            const swapped = [];
+            for (const slot of slots) {
+                if (!this._channelQueue.length) break;
+                const video = this._channelQueue.shift();
+                VideoSwapper.swap(slot, video, dateStr);
+                this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
+                this._swapMap.set(video.id, video);
+                swapped.push(video);
+            }
+
+            if (swapped.length) {
+                this._enrichSwappedDates(swapped);
+            }
+        }
+
+        _reSwapStaleElements() {
+            const swapped = document.querySelectorAll('[data-wbt-swapped]');
+            for (const el of swapped) {
+                const videoId = el.dataset.wbtSwapped;
+                const video = this._swapMap.get(videoId);
+                if (!video) continue;
+
+                // Check if YouTube's Polymer re-rendered this element
+                const link = el.querySelector('a[href*="/watch?v="]');
+                if (link && !link.href.includes(videoId)) {
+                    const dateStr = Store.getCurrentDate();
+                    if (dateStr) VideoSwapper.swap(el, video, dateStr);
+                }
+            }
+        }
+
+        _installClickInterceptor() {
+            document.addEventListener('click', (e) => {
+                const link = e.target.closest('a[href*="/watch?v="]');
+                if (!link) return;
+                const container = link.closest('[data-wbt-swapped]');
+                if (!container) return;
+                const swappedId = container.dataset.wbtSwapped;
+                if (swappedId && !link.href.includes(swappedId)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.location.href = `/watch?v=${swappedId}`;
+                }
+            }, true); // capture phase
+        }
+
+        async _refreshFeed() {
+            this._feedQueue = [];
+            this._feedFetching = false;
+            this._feedPage = 0;
+            // Clear swap markers so elements get re-processed
+            for (const el of document.querySelectorAll('[data-wbt-swapped]')) {
+                el.removeAttribute('data-wbt-swapped');
+            }
+            this._swapMap.clear();
+
+            // Clear all caches for this date
             const dateStr = Store.getCurrentDate();
             if (dateStr) {
                 const d = new Date(dateStr);
@@ -2541,85 +2506,8 @@
                 const cats = Store.getCategories();
                 Store._del(`wbt_cache_cats_${cats.join('_')}_${dk}`);
             }
-
-            // Reset seen IDs so the full pool is available
             Store.clearSeenIds();
-
-            this._tryReplaceHomepage();
-        }
-
-        // --- Video page sidebar replacement ---
-
-        async _tryReplaceSidebar() {
-            if (this._sidebarReplaced || this._sidebarLoading) return;
-
-            const sidebar = this._getSidebarContainer();
-            if (!sidebar) return;
-
-            // Check if already replaced
-            if (sidebar.querySelector('.wbt-sidebar-container')) {
-                this._sidebarReplaced = true;
-                return;
-            }
-
-            this._sidebarLoading = true;
-
-            // Hide original recommendations
-            this._hideOriginalSidebar(sidebar);
-
-            const container = document.createElement('div');
-            container.className = 'wbt-sidebar-container';
-            container.appendChild(VideoRenderer.loadingIndicator());
-            sidebar.insertBefore(container, sidebar.firstChild);
-
-            const dateStr = Store.getCurrentDate();
-            const videoId = new URLSearchParams(location.search).get('v');
-            if (!dateStr || !videoId) {
-                _clear(container);
-                this._sidebarReplaced = true;
-                this._sidebarLoading = false;
-                return;
-            }
-
-            try {
-                const recommendations = await this.feedEngine.buildRecommendations(videoId, dateStr);
-
-                if (!document.body.contains(container)) {
-                    this._sidebarLoading = false;
-                    return;
-                }
-
-                _clear(container);
-
-                if (!recommendations.length) {
-                    this._sidebarReplaced = true;
-                    this._sidebarLoading = false;
-                    return;
-                }
-
-                const header = document.createElement('div');
-                header.className = 'wbt-sidebar-header';
-                header.textContent = 'Recommended';
-                container.appendChild(header);
-
-                // Show all recommendations — ~30 sidebar cards is fine for perf
-                for (const video of recommendations) {
-                    container.appendChild(VideoRenderer.sidebarCard(video));
-                    this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
-                }
-
-                // Record impressions for overexposure tracking
-                Store.recordImpressions(recommendations.map(v => v.id));
-
-                this._sidebarReplaced = true;
-                this._sidebarLoading = false;
-            } catch (e) {
-                console.warn('[iw2gb] Sidebar error:', e.message);
-                if (document.body.contains(container)) {
-                    _clear(container);
-                }
-                this._sidebarLoading = false;
-            }
+            // Nuke interval will re-swap on next tick
         }
 
         // --- Video endscreen replacement ---
@@ -2706,17 +2594,23 @@
         // --- Force reload ---
 
         forceReload() {
-            this._homepageReplaced = false;
-            this._homepageLoading = false;
-            this._sidebarReplaced = false;
-            this._sidebarLoading = false;
-            this._channelReplaced = false;
-            this._channelLoading = false;
+            // Clear swap state
+            this._feedQueue = [];
+            this._sidebarQueue = [];
+            this._channelQueue = [];
+            this._feedFetching = false;
+            this._sidebarFetching = false;
+            this._channelFetching = false;
+            this._feedPage = 0;
+            this._swapMap.clear();
             this._endscreenReplaced = false;
             this._endscreenLoading = false;
-            for (const sel of ['.wbt-container', '.wbt-sidebar-container', '.wbt-channel-container', '.wbt-endscreen-container']) {
-                const el = document.querySelector(sel);
-                if (el) el.remove();
+            // Remove endscreen overlay
+            const endscreen = document.querySelector('.wbt-endscreen-container');
+            if (endscreen) endscreen.remove();
+            // Clear all swap markers so elements get re-processed
+            for (const el of document.querySelectorAll('[data-wbt-swapped]')) {
+                el.removeAttribute('data-wbt-swapped');
             }
             // Clear rewritten date markers so they get recalculated
             for (const el of document.querySelectorAll('[data-wbt-date-rewritten]')) {
@@ -2725,6 +2619,19 @@
             for (const el of document.querySelectorAll('[data-wbt-comment-checked]')) {
                 el.removeAttribute('data-wbt-comment-checked');
             }
+            // Clear caches
+            const dateStr = Store.getCurrentDate();
+            if (dateStr) {
+                const d = new Date(dateStr);
+                const dk = d.toDateString();
+                Store._del(`wbt_cache_feed_${dk}`);
+                Store._del(`wbt_cache_subs_${dk}`);
+                Store._del(`wbt_cache_search_${dk}`);
+                Store._del(`wbt_cache_topics_${dk}`);
+                const cats = Store.getCategories();
+                Store._del(`wbt_cache_cats_${cats.join('_')}_${dk}`);
+            }
+            Store.clearSeenIds();
             this._onNavChange();
         }
 
@@ -2745,185 +2652,6 @@
 
             params.set('search_query', `${query} before:${dateStr}`.trim());
             window.location.replace(`/results?${params.toString()}`);
-        }
-
-        // --- Channel page replacement ---
-
-        async _tryReplaceChannelPage() {
-            if (this._channelReplaced || this._channelLoading) return;
-
-            const grid = this._getChannelGrid();
-            if (!grid) return;
-
-            if (grid.querySelector('.wbt-channel-container')) {
-                this._channelReplaced = true;
-                return;
-            }
-
-            this._channelLoading = true;
-
-            const channelName = this._getChannelName();
-            if (!channelName) {
-                this._channelLoading = false;
-                return;
-            }
-
-            const dateStr = Store.getCurrentDate();
-            if (!dateStr) {
-                this._channelLoading = false;
-                return;
-            }
-
-            // Hide original channel content
-            for (const child of grid.children) {
-                if (!child.classList.contains('wbt-channel-container') && !child.dataset.wbtHidden) {
-                    child.style.display = 'none';
-                    child.dataset.wbtHidden = '1';
-                }
-            }
-
-            const container = _el('div', 'wbt-channel-container');
-            container.appendChild(VideoRenderer.loadingIndicator());
-            grid.insertBefore(container, grid.firstChild);
-
-            try {
-                // Get channel ID from page metadata
-                const channelIdMeta = document.querySelector('meta[itemprop="channelId"]')?.content
-                    || document.querySelector('link[rel="canonical"]')?.href?.match(/channel\/(UC[^/]+)/)?.[1]
-                    || '';
-
-                // Search for this channel's videos before the set date, sorted by date (newest first)
-                // This is more reliable than the browse endpoint which only returns the first page
-                const q = this.feedEngine.api._buildDateQuery(`"${channelName}"`, null, dateStr);
-                const body = { query: q, params: 'CAISAhAB' }; // sort by upload date + videos only
-                const data = await this.feedEngine.api._post('search', body);
-                let videos = this.feedEngine.api._parseSearchResults(data);
-
-                // Filter to only this channel's videos (search may return others mentioning the name)
-                if (channelIdMeta) {
-                    const strict = videos.filter(v => v.channelId === channelIdMeta);
-                    if (strict.length > 0) videos = strict;
-                }
-
-                if (!document.body.contains(container)) {
-                    this._channelLoading = false;
-                    return;
-                }
-
-                _clear(container);
-
-                if (!videos.length) {
-                    container.appendChild(_el('div', 'wbt-empty', [
-                        _el('h3', null, 'No videos found'),
-                        _el('p', null, 'No videos from this channel before the selected date.'),
-                    ]));
-                    this._channelReplaced = true;
-                    this._channelLoading = false;
-                    return;
-                }
-
-                const videoGrid = _el('div', 'wbt-grid');
-                for (const video of videos) {
-                    videoGrid.appendChild(VideoRenderer.homepageCard(video));
-                    this._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
-                }
-                container.appendChild(videoGrid);
-
-                // Store state for infinite scroll
-                this._channelAllVideos = [...videos];
-                this._channelScrollPage = 1;
-                this._channelScrollActive = true;
-                this._channelScrollFetching = false;
-                this._channelName = channelName;
-                this._channelId = channelIdMeta;
-
-                // Infinite scroll sentinel
-                const sentinel = document.createElement('div');
-                sentinel.className = 'wbt-scroll-sentinel';
-                sentinel.style.cssText = 'height:1px;width:100%;';
-                container.appendChild(sentinel);
-
-                const loadingMore = _el('div', 'wbt-loading-more', 'Loading more videos...');
-                loadingMore.style.cssText = 'text-align:center;padding:20px;color:var(--wbt-text-secondary);font-size:14px;display:none;';
-                container.appendChild(loadingMore);
-
-                const self = this;
-                const channelFetchMore = async () => {
-                    if (!self._channelScrollActive || self._channelScrollFetching) return;
-                    if (!document.body.contains(videoGrid)) { self._channelScrollActive = false; return; }
-
-                    self._channelScrollFetching = true;
-                    loadingMore.style.display = 'block';
-
-                    try {
-                        self._channelScrollPage++;
-                        const existingIds = new Set(self._channelAllVideos.map(v => v.id));
-
-                        // Shift the date window backward for each page
-                        const d = new Date(dateStr);
-                        const daysShift = CONFIG.feed.dateWindowDays * 2 * (self._channelScrollPage - 1);
-                        d.setDate(d.getDate() - daysShift);
-                        const shiftedBefore = d.toISOString().split('T')[0];
-
-                        const q2 = self.feedEngine.api._buildDateQuery(`"${self._channelName}"`, null, shiftedBefore);
-                        const body2 = { query: q2, params: 'CAISAhAB' };
-                        const data2 = await self.feedEngine.api._post('search', body2);
-                        let moreVideos = self.feedEngine.api._parseSearchResults(data2);
-
-                        if (self._channelId) {
-                            const strict = moreVideos.filter(v => v.channelId === self._channelId);
-                            if (strict.length > 0) moreVideos = strict;
-                        }
-
-                        const fresh = moreVideos.filter(v => !existingIds.has(v.id));
-
-                        if (fresh.length === 0) {
-                            loadingMore.textContent = 'No more videos to load';
-                            loadingMore.style.display = 'block';
-                            self._channelScrollActive = false;
-                            return;
-                        }
-
-                        for (const video of fresh) {
-                            videoGrid.appendChild(VideoRenderer.homepageCard(video));
-                            self._channelAllVideos.push(video);
-                            self._videoMetaMap.set(video.id, { channel: video.channel, channelId: video.channelId, title: video.title });
-                        }
-                    } catch (e) {
-                        console.warn('[iw2gb] Channel infinite scroll error:', e.message);
-                    } finally {
-                        self._channelScrollFetching = false;
-                        loadingMore.style.display = 'none';
-                    }
-                };
-
-                const channelObserver = new IntersectionObserver((entries) => {
-                    if (entries[0].isIntersecting && self._channelScrollActive && !self._channelScrollFetching) {
-                        channelFetchMore();
-                    }
-                }, { rootMargin: '1500px' });
-                channelObserver.observe(sentinel);
-
-                const channelCleanup = setInterval(() => {
-                    if (!document.body.contains(videoGrid)) {
-                        channelObserver.disconnect();
-                        clearInterval(channelCleanup);
-                    }
-                }, 2000);
-
-                this._channelReplaced = true;
-                this._channelLoading = false;
-
-                // Enrich dates
-                this._enrichCardDates(videos);
-            } catch (e) {
-                console.warn('[iw2gb] Channel page error:', e.message);
-                if (document.body.contains(container)) {
-                    _clear(container);
-                    container.appendChild(VideoRenderer.errorMessage(e.message));
-                }
-                this._channelLoading = false;
-            }
         }
 
         // --- Comment filtering ---
@@ -3059,7 +2787,7 @@
 
         // --- Progressive real-date enrichment for feed cards ---
 
-        async _enrichCardDates(videos) {
+        async _enrichSwappedDates(videos) {
             const dateStr = Store.getCurrentDate();
             if (!dateStr) return;
 
@@ -3068,10 +2796,15 @@
                     const pubDate = await this.feedEngine.api.getPublishDate(video.id);
                     if (!pubDate) continue;
 
-                    // Update homepage card
-                    const card = document.querySelector(`[data-video-id="${video.id}"] .wbt-card-date`);
-                    if (card) {
-                        card.textContent = DateHelper.relativeToDate(new Date(pubDate), dateStr);
+                    // Find the swapped element by data attribute
+                    const el = document.querySelector(`[data-wbt-swapped="${video.id}"]`);
+                    if (!el) continue;
+
+                    // Find metadata spans and update the date one
+                    const sel = VideoSwapper._getSelectors('feed');
+                    const metaEls = el.querySelectorAll(sel.metadata);
+                    if (metaEls.length >= 2) {
+                        metaEls[1].textContent = DateHelper.relativeToDate(new Date(pubDate), dateStr);
                     }
                 } catch { /* skip failed lookups */ }
             }
@@ -3087,7 +2820,7 @@
             if (elapsed >= 3600000 && (this._isHomePage() || this._isSubscriptionsPage())) { // 1 hour
                 console.log('[iw2gb] Hourly refresh triggered');
                 Store.setLastRefresh(Date.now()); // update BEFORE refresh to prevent re-triggering
-                this._refreshHomepage();
+                this._refreshFeed();
             }
         }
     }
@@ -3104,23 +2837,6 @@
                     /* Brand / accent */
                     --wbt-accent: #cc0000;
                     --wbt-accent-hover: #aa0000;
-
-                    /* Text hierarchy (light mode) */
-                    --wbt-text-primary: #333;
-                    --wbt-text-secondary: #666;
-                    --wbt-text-muted: #888;
-                    --wbt-text-link: #0033cc;
-
-                    /* Surfaces (light mode) */
-                    --wbt-surface-empty: #f2f2f2;
-                    --wbt-surface-thumb: #000;
-                    --wbt-border-light: #e0e0e0;
-
-                    /* Button (light mode) */
-                    --wbt-btn-bg: #f0f0f0;
-                    --wbt-btn-bg-hover: #e0e0e0;
-                    --wbt-btn-text: #333;
-                    --wbt-btn-border: #ccc;
 
                     /* Panel (always dark) */
                     --wbt-panel-bg: #1a1a1a;
@@ -3177,19 +2893,6 @@
                     --wbt-fab-bg-hover: #aa0000;
                 }
 
-                html[dark] {
-                    --wbt-text-primary: #ddd;
-                    --wbt-text-secondary: #aaa;
-                    --wbt-text-muted: #888;
-                    --wbt-text-link: #6e9fff;
-                    --wbt-surface-empty: #1a1a1a;
-                    --wbt-border-light: #333;
-                    --wbt-btn-bg: #272727;
-                    --wbt-btn-bg-hover: #333;
-                    --wbt-btn-text: #ccc;
-                    --wbt-btn-border: #444;
-                }
-
                 /* Hide Shorts shelf & tabs everywhere */
                 ytd-reel-shelf-renderer,
                 ytd-rich-shelf-renderer[is-shorts],
@@ -3213,218 +2916,12 @@
                     display: none !important;
                 }
 
-                /* === iwant2gob4ck Custom Components === */
-
-                /* Homepage / channel grid — span full width of YouTube's grid */
-                .wbt-container,
-                .wbt-channel-container {
-                    grid-column: 1 / -1 !important;
-                    width: 100% !important;
-                    padding: 16px 0 !important;
-                    box-sizing: border-box !important;
-                }
-
-                .wbt-toolbar {
-                    display: flex !important;
-                    gap: 8px !important;
-                    margin-bottom: 16px !important;
-                    padding: 0 16px !important;
-                }
-
-                .wbt-refresh-btn {
-                    background: var(--wbt-accent) !important;
-                    color: #fff !important;
-                    border: none !important;
-                    padding: 8px 16px !important;
-                    font-size: 12px !important;
-                    font-weight: bold !important;
-                    cursor: pointer !important;
-                    text-transform: uppercase !important;
-                    letter-spacing: 0.5px !important;
-                }
-                .wbt-refresh-btn:hover {
-                    background: var(--wbt-accent-hover) !important;
-                }
-
-                .wbt-grid {
-                    display: grid !important;
-                    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)) !important;
-                    gap: 16px !important;
-                    padding: 0 16px !important;
-                    width: 100% !important;
-                    box-sizing: border-box !important;
-                }
-
-                .wbt-card {
-                    background: transparent !important;
-                }
-
-                .wbt-card-link {
-                    text-decoration: none !important;
-                    color: inherit !important;
-                    display: block !important;
-                }
-
-                .wbt-thumb-wrap {
-                    position: relative !important;
-                    width: 100% !important;
-                    padding-bottom: 56.25% !important;
-                    overflow: hidden !important;
-                    background: var(--wbt-surface-thumb) !important;
-                }
-
-                .wbt-thumb {
-                    position: absolute !important;
-                    top: 0 !important; left: 0 !important;
-                    width: 100% !important;
-                    height: 100% !important;
-                    object-fit: cover !important;
-                }
-
-                .wbt-card-info {
-                    padding: 8px 0 !important;
-                }
-
-                .wbt-card-title {
-                    font-size: 14px !important;
-                    font-weight: bold !important;
-                    line-height: 1.3 !important;
-                    color: var(--wbt-text-link) !important;
-                    display: -webkit-box !important;
-                    -webkit-line-clamp: 2 !important;
-                    -webkit-box-orient: vertical !important;
-                    overflow: hidden !important;
-                    margin-bottom: 4px !important;
-                }
-                .wbt-card-link:hover .wbt-card-title {
-                    text-decoration: underline !important;
-                }
-
-                .wbt-card-channel {
-                    font-size: 12px !important;
-                    color: var(--wbt-text-secondary) !important;
-                    margin-bottom: 2px !important;
-                }
-
-                .wbt-card-meta {
-                    font-size: 12px !important;
-                    color: var(--wbt-text-muted) !important;
-                }
-
-                .wbt-dot {
-                    margin: 0 4px !important;
-                }
-
-                /* Sidebar recommendations */
-                .wbt-sidebar-container {
-                    padding: 8px 0 !important;
-                }
-
-                .wbt-sidebar-header {
-                    font-weight: bold !important;
-                    color: var(--wbt-text-primary) !important;
-                    padding: 0 0 12px 0 !important;
-                    border-bottom: 1px solid var(--wbt-border-light) !important;
-                    margin-bottom: 12px !important;
-                    text-transform: uppercase !important;
-                    letter-spacing: 0.5px !important;
-                    font-size: 11px !important;
-                }
-
-                .wbt-sidebar-card {
-                    margin-bottom: 8px !important;
-                }
-
-                .wbt-sidebar-link {
-                    display: flex !important;
-                    gap: 8px !important;
-                    text-decoration: none !important;
-                    color: inherit !important;
-                }
-
-                .wbt-sidebar-thumb-wrap {
-                    flex-shrink: 0 !important;
-                    width: 168px !important;
-                    height: 94px !important;
-                    overflow: hidden !important;
-                    background: var(--wbt-surface-thumb) !important;
-                }
-
-                .wbt-sidebar-thumb {
-                    width: 100% !important;
-                    height: 100% !important;
-                    object-fit: cover !important;
-                }
-
-                .wbt-sidebar-info {
-                    flex: 1 !important;
-                    min-width: 0 !important;
-                }
-
-                .wbt-sidebar-title {
-                    font-size: 13px !important;
-                    font-weight: bold !important;
-                    line-height: 1.3 !important;
-                    color: var(--wbt-text-link) !important;
-                    display: -webkit-box !important;
-                    -webkit-line-clamp: 2 !important;
-                    -webkit-box-orient: vertical !important;
-                    overflow: hidden !important;
-                    margin-bottom: 4px !important;
-                }
-                .wbt-sidebar-link:hover .wbt-sidebar-title {
-                    text-decoration: underline !important;
-                }
-
-                .wbt-sidebar-channel {
-                    font-size: 11px !important;
-                    color: var(--wbt-text-secondary) !important;
-                    margin-bottom: 2px !important;
-                }
-
-                .wbt-sidebar-meta {
-                    font-size: 11px !important;
-                    color: var(--wbt-text-muted) !important;
-                }
-
-                /* Loading / empty states */
+                /* Loading indicator (used by endscreen) */
                 .wbt-loading {
                     text-align: center !important;
                     padding: 40px !important;
-                    color: var(--wbt-text-secondary) !important;
+                    color: #aaa !important;
                     font-size: 14px !important;
-                }
-
-                .wbt-empty {
-                    text-align: center !important;
-                    padding: 40px !important;
-                    background: var(--wbt-surface-empty) !important;
-                }
-                .wbt-empty h3 {
-                    margin: 0 0 8px !important;
-                    color: var(--wbt-text-primary) !important;
-                }
-                .wbt-empty p {
-                    margin: 0 !important;
-                    color: var(--wbt-text-secondary) !important;
-                    font-size: 13px !important;
-                }
-
-                /* Load more button */
-                .wbt-load-more {
-                    display: block !important;
-                    margin: 16px auto !important;
-                    background: var(--wbt-btn-bg) !important;
-                    color: var(--wbt-btn-text) !important;
-                    border: 1px solid var(--wbt-btn-border) !important;
-                    padding: 10px 32px !important;
-                    font-size: 12px !important;
-                    font-weight: bold !important;
-                    cursor: pointer !important;
-                    text-transform: uppercase !important;
-                }
-                .wbt-load-more:hover {
-                    background: var(--wbt-btn-bg-hover) !important;
                 }
 
                 /* === Control Panel === */
@@ -3921,23 +3418,6 @@
                     color: var(--wbt-endscreen-channel) !important;
                 }
 
-                /* === VORAPIS layout compatibility === */
-                .distiller_streamcontent .wbt-container,
-                .distiller_streamcontent .wbt-channel-container {
-                    display: block !important;
-                    width: 100% !important;
-                    padding: 16px !important;
-                    box-sizing: border-box !important;
-                }
-                .distiller_yt-sb .wbt-sidebar-container {
-                    padding: 8px !important;
-                }
-
-                /* === StarTube layout compatibility === */
-                .wbt-container, .wbt-sidebar-container, .wbt-channel-container {
-                    position: relative !important;
-                    z-index: 1 !important;
-                }
             `);
         }
     }
@@ -5027,7 +4507,7 @@
 
     class App {
         static async init() {
-            console.log('[iw2gb] Initializing v151...');
+            console.log('[iw2gb] Initializing v152...');
 
             // Validate time offset isn't insane (max 24h drift)
             const offset = Store.getTimeOffset();
@@ -5087,7 +4567,7 @@
                 Store.setDate(d.toISOString().split('T')[0]);
             }
 
-            console.log('[iw2gb] v126 Ready. Date:', Store.getCurrentDate(),
+            console.log('[iw2gb] v152 Ready. Date:', Store.getCurrentDate(),
                 '| Active:', Store.isActive(), '| Clock:', Store.isClockActive(),
                 '| TimeOffset:', Store.getTimeOffset());
         }
